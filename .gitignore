@@ -29,9 +29,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# --- Logs & runtime state ---
+# --- Logs & local state ---
 *.log
 ac_panel.log
+# which brand this machine is set up for
+config.json
 
 # --- Build artifacts & distribution ---
 build/

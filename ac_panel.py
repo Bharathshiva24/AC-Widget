@@ -1,7 +1,11 @@
-"""AC - a macOS menubar control panel for a Panasonic MirAIe air conditioner.
+"""AC - a macOS menubar control panel for smart air conditioners.
 
-Run:   python ac_panel.py
-Needs: MIRAIE_MOBILE and MIRAIE_PASSWORD set in the environment.
+Run:     python ac_panel.py           the configured brand (see config.json)
+         python ac_panel.py --demo    a simulated home, no hardware needed
+Set up:  bash setup.sh                pick a brand and save its credentials
+
+Brands live in the acbrands package, one module each; the panel renders only
+the controls the selected brand reports that it supports.
 """
 import asyncio
 import json
@@ -13,11 +17,13 @@ import threading
 import time
 
 from aiohttp import web
-from miraie_ac import DisplayMode, FanMode, HVACMode, PowerMode, PresetMode, SwingMode
 
-WIDTH, HEIGHT = 700, 560
+import acbrands
+
+WIDTH, HEIGHT = 700, 520
 TOKEN = secrets.token_urlsafe(24)
-STATE = {"devices": [], "error": None, "quit": False, "height": HEIGHT, "selected": None}
+STATE = {"driver": None, "devices": [], "error": None, "quit": False,
+         "height": HEIGHT, "selected": None}
 ROOMS = ("bedroom", "hall")
 ROOM_WORDS = {"bedroom": ("bed", "master"), "hall": ("hall", "living", "drawing", "lounge")}
 
@@ -28,7 +34,7 @@ def assign_rooms(devices):
     """Decide which AC sits in which room: by name if it says so, otherwise in order."""
     rooms = {}
     for device in devices:
-        name = (device.friendly_name or "").lower()
+        name = (device.name or "").lower()
         for room in ROOMS:
             if room not in rooms and any(word in name for word in ROOM_WORDS[room]):
                 rooms[room] = device
@@ -42,21 +48,11 @@ def assign_rooms(devices):
 
 
 def device_state(device, room):
-    st = device.status
-    return {
-        "id": device.id,
-        "room": room,
-        "name": device.friendly_name,
-        "online": bool(st.is_online),
-        "power": st.power_mode == PowerMode.ON,
-        "temp": st.temperature,
-        "room_temp": st.room_temperature,
-        "mode": st.hvac_mode.value,
-        "fan": st.fan_mode.value,
-        "preset": st.preset_mode.value,
-        "swing": st.v_swing_mode.value,
-        "display": st.display_mode == DisplayMode.ON,
-    }
+    """One AC as the panel sees it: its state plus what it is able to do."""
+    state = dict(device.snapshot())
+    state.setdefault("toggles", {})
+    state.update(id=device.id, room=room, name=device.name, caps=device.caps.as_dict())
+    return state
 
 
 def snapshot():
@@ -79,136 +75,54 @@ def menubar_title():
 
 
 async def run_command(device_id, action, value):
+    """Hand one change to the brand driver, after checking the unit supports it."""
     matches = [d for d in STATE["devices"] if d.id == device_id]
     if not matches:
         raise RuntimeError("That AC is not connected")
     device = matches[0]
-    if action == "power":
-        await (device.turn_on() if value else device.turn_off())
-    elif action == "temp":
-        await device.set_temperature(max(16, min(30, int(value))))
-    elif action == "mode":
-        await device.set_hvac_mode(HVACMode(value))
-    elif action == "fan":
-        await device.set_fan_mode(FanMode(value))
-    elif action == "preset":
-        await device.set_preset_mode(PresetMode(value))
-    elif action == "swing":
-        await device.set_v_swing_mode(SwingMode(int(value)))
-    elif action == "display":
-        await device.set_display_mode(DisplayMode.ON if value else DisplayMode.OFF)
-    else:
-        raise ValueError("Unknown action: %s" % action)
+    if action == "preset" and value == "none":
+        pass                       # clearing a preset is always allowed
+    elif not device.caps.supports(action, value):
+        raise ValueError("%s does not support %s" % (device.name, action))
+    await STATE["driver"].command(device, action, value)
 
 
 def log(message):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), message, flush=True)
 
 
-def login_id():
-    """The MirAIe login. A bare 10-digit Indian mobile number gets its +91 added."""
-    value = os.environ["MIRAIE_MOBILE"].strip().replace(" ", "")
-    if value.isdigit() and len(value) == 10:
-        value = "+91" + value
-    elif value.isdigit() and len(value) == 12 and value.startswith("91"):
-        value = "+" + value
-    return value
-
-
-async def explain_rejection():
-    """Ask MirAIe directly why the login failed and write its answer to the log (never the password)."""
-    import aiohttp
-    from miraie_ac import constants
-    mobile, password = login_id(), os.environ["MIRAIE_PASSWORD"]
-    log("Login used: %s***%s, password of %d characters" % (mobile[:3], mobile[-4:], len(password)))
-    try:
-        async with aiohttp.ClientSession() as session:
-            body = {"clientId": constants.httpClientId, "password": password,
-                    "scope": "an_14214235325", "mobile": mobile}
-            async with session.post(constants.loginUrl, json=body) as response:
-                text = (await response.text())[:300]
-                if "accessToken" in text:
-                    text = "(login accepted)"
-                log("MirAIe answered %s: %s" % (response.status, text))
-    except Exception as exc:
-        log("Could not ask MirAIe: %s" % exc)
-
-
-async def connect():
-    from miraie_ac import MirAIeBroker, MirAIeHub
-
+async def connect(brand_id):
+    """Keep trying to reach the configured brand until the ACs answer."""
     while not STATE["devices"]:
-        hub = MirAIeHub()
+        driver = acbrands.build(brand_id)
+        STATE["driver"] = driver
+        missing = driver.missing_fields()
+        if missing:
+            STATE["error"] = ("%s is not set up yet. Run setup to add your %s: "
+                              "bash ~/ac-control/setup.sh"
+                              % (driver.label, " and ".join(missing)))
+            log("Not configured: missing %s for %s" % (", ".join(missing), brand_id))
+            await asyncio.sleep(300)
+            continue
         try:
-            await hub.init(login_id(), os.environ["MIRAIE_PASSWORD"], MirAIeBroker())
-            if not hub.home.devices:
-                raise RuntimeError("No AC found on this MirAIe account")
-            STATE["devices"] = list(hub.home.devices)
+            STATE["devices"] = await driver.connect()
             STATE["error"] = None
-            log("Connected: %d AC(s) found" % len(STATE["devices"]))
-        except Exception as exc:  # show the problem in the panel and retry
+            log("Connected to %s: %d AC(s) found" % (driver.label, len(STATE["devices"])))
+        except acbrands.AuthError as exc:
+            log("Could not connect: %s" % exc)
+            explain = getattr(driver, "explain_rejection", None)
+            if explain is not None:
+                await explain(log)
+            STATE["error"] = ("%s Run setup again to re-enter them: "
+                              "bash ~/ac-control/setup.sh" % exc)
+            await driver.close()
+            await asyncio.sleep(600)
+        except Exception as exc:   # temporary: show it in the panel and retry
             reason = str(exc) or exc.__class__.__name__
             log("Could not connect: %s" % reason)
-            rejected = "Authentication failed" in reason
-            if rejected:
-                await explain_rejection()
-                STATE["error"] = ("MirAIe did not accept the saved mobile number or password. "
-                                  "Run setup again to re-enter them: bash ~/ac-control/setup.sh")
-            else:
-                STATE["error"] = reason + ". Trying again in a few seconds."
-            try:
-                await hub.close()
-            except Exception:
-                pass
-            await asyncio.sleep(600 if rejected else 15)
-
-
-# ------------------------------------------------------- demo (no real AC)
-
-class _FakeStatus:
-    def __init__(self, on, temp, room):
-        self.is_online = True
-        self.temperature = temp
-        self.room_temperature = room
-        self.power_mode = PowerMode.ON if on else PowerMode.OFF
-        self.fan_mode = FanMode.LOW
-        self.hvac_mode = HVACMode.COOL
-        self.preset_mode = PresetMode.NONE
-        self.v_swing_mode = SwingMode.ONE
-        self.display_mode = DisplayMode.ON
-
-
-class _FakeDevice:
-    def __init__(self, id, name, on, temp, room):
-        self.id = id
-        self.friendly_name = name
-        self.status = _FakeStatus(on, temp, room)
-
-    async def turn_on(self):
-        self.status.power_mode = PowerMode.ON
-
-    async def turn_off(self):
-        self.status.power_mode = PowerMode.OFF
-
-    async def set_temperature(self, value):
-        self.status.temperature = float(value)
-
-    async def set_hvac_mode(self, mode):
-        self.status.hvac_mode = mode
-
-    async def set_fan_mode(self, mode):
-        self.status.fan_mode = mode
-
-    async def set_preset_mode(self, mode):
-        self.status.preset_mode = mode
-        if mode == PresetMode.ECO:
-            self.status.temperature = 26.0
-
-    async def set_v_swing_mode(self, mode):
-        self.status.v_swing_mode = mode
-
-    async def set_display_mode(self, mode):
-        self.status.display_mode = mode
+            STATE["error"] = reason + ". Trying again in a few seconds."
+            await driver.close()
+            await asyncio.sleep(driver.retry_seconds)
 
 
 # ------------------------------------------------------------ local server
@@ -240,7 +154,7 @@ def build_app(port):
 
     async def ui(request):
         body = await request.json()
-        STATE["height"] = max(200, min(700, int(body.get("height", HEIGHT))))
+        STATE["height"] = max(360, min(760, int(body.get("height", HEIGHT))))
         STATE["selected"] = body.get("selected")
         return web.json_response({"ok": True})
 
@@ -378,11 +292,7 @@ def run_menubar(url):
 # --------------------------------------------------------------------- main
 
 def main():
-    demo = "--demo" in sys.argv
-    if not demo:
-        missing = [k for k in ("MIRAIE_MOBILE", "MIRAIE_PASSWORD") if not os.environ.get(k)]
-        if missing:
-            sys.exit("Set %s first, for example:\n  export MIRAIE_MOBILE=\"+91XXXXXXXXXX\"" % " and ".join(missing))
+    brand = "demo" if "--demo" in sys.argv else acbrands.selected_brand()
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -399,15 +309,12 @@ def main():
         except Exception as exc:
             log("TV access could not start: %s" % exc)
 
-    if demo:
-        STATE["devices"] = [_FakeDevice("a1", "PANASONIC AC", True, 24.0, 25.0),
-                            _FakeDevice("a2", "PANASONIC AC 2", False, 26.0, 29.0)]
+    asyncio.run_coroutine_threadsafe(connect(brand), loop)
+    if brand == "demo":
         print("Demo panel at " + url)
-    else:
-        asyncio.run_coroutine_threadsafe(connect(), loop)
 
-    log("AC started")
-    if demo and "--browser" in sys.argv:
+    log("AC started (%s)" % brand)
+    if brand == "demo" and "--browser" in sys.argv:
         threading.Event().wait()
     else:
         run_menubar(url)
@@ -471,6 +378,7 @@ PAGE = r"""<!doctype html>
   --gline:rgba(255,255,255,.10);--ac:#2f8cff;--airc:rgba(110,190,255,.85);
   --ink:#f2f3f7;--soft:#aeb3c2;--faint:#7d8294;--gnd:rgba(0,0,0,.45)}
 *{box-sizing:border-box;margin:0;-webkit-user-select:none;user-select:none}
+[hidden]{display:none!important}
 html,body{height:100%;background:transparent;overflow:hidden}
 body{font:13px/1.25 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Helvetica,sans-serif;color:var(--ink);
   -webkit-font-smoothing:antialiased;cursor:default}
@@ -666,6 +574,7 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
 .kname{font-size:11.5px;color:var(--gsub);letter-spacing:.1px}
 .kval{font-size:13px;font-weight:650;color:var(--gtext);margin-top:-1px;font-variant-numeric:tabular-nums}
 .pills{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:15px}
+.pills>:last-child:nth-child(odd){grid-column:1/-1}
 .tile{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:14px;background:var(--gfill);text-align:left;transition:background .3s,box-shadow .3s}
 .tile:hover{background:var(--gfill2)}
 .tile i{flex:none;width:28px;height:28px;border-radius:50%;background:var(--gfill);display:grid;place-items:center;color:var(--gtext);transition:background .3s,color .3s}
@@ -734,15 +643,15 @@ button:focus{outline:none}
       <div class="roomline" id="room-t"></div>
       <div class="seg" id="seg-mode" role="group" aria-label="Mode"></div>
       <div class="rule"></div>
-      <div class="knobs">
-        <div class="kwrap">
+      <div class="knobs" id="knobs">
+        <div class="kwrap" id="w-fan">
           <div class="rk" id="k-fan" tabindex="0" role="slider" aria-label="Fan speed" aria-valuemin="0" aria-valuemax="4">
             <svg viewBox="0 0 100 100"><g class="segs"></g><g class="needle"><rect x="33" y="48.750" width="5" height="2.500" rx="1.250"/></g></svg>
             <div class="kface"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.600"/><path d="M12 10.400C10 4 15 2.500 16 6c.700 2.500-2 4-4 4.400M13.600 12c6.400-2 7.900 3 4.400 4-2.500.700-4-2-4.400-4M12 13.600c2 6.400-3 7.900-4 4.400-.700-2.500 2-4 4-4.400M10.400 12c-6.400 2-7.900-3-4.400-4 2.500-.700 4 2 4.400 4"/></svg></div>
           </div>
           <div class="kname">Fan Speed</div><div class="kval" id="v-fan">--</div>
         </div>
-        <div class="kwrap">
+        <div class="kwrap" id="w-swing">
           <div class="rk" id="k-swing" tabindex="0" role="slider" aria-label="Swing" aria-valuemin="0" aria-valuemax="5">
             <svg viewBox="0 0 100 100"><g class="segs"></g><g class="needle"><rect x="33" y="48.750" width="5" height="2.500" rx="1.250"/></g></svg>
             <div class="kface"><svg viewBox="0 0 24 24"><path d="M4 5h16M7 9.500 4.500 19M12 9.500V20M17 9.500 19.500 19"/></svg></div>
@@ -750,10 +659,7 @@ button:focus{outline:none}
           <div class="kname">Swing</div><div class="kval" id="v-swing">--</div>
         </div>
       </div>
-      <div class="pills">
-        <button class="tile" id="c-eco" aria-pressed="false"><i><svg viewBox="0 0 24 24"><path d="M5 19c0-9 5-14 15-14 0 10-5 15-13 14M5 19c3-5 6-8 10-10"/></svg></i><div><b>Eco</b><small id="v-eco">Off</small></div></button>
-        <button class="tile" id="c-boost" aria-pressed="false"><i><svg viewBox="0 0 24 24"><path d="M13 3 5 13.500h6L10 21l8-10.500h-6z"/></svg></i><div><b>Powerful</b><small id="v-boost">Off</small></div></button>
-      </div>
+      <div class="pills" id="pills"></div>
     </div>
   </div>
 </div>
@@ -770,10 +676,21 @@ const ICON={cool:"M12 3v18M4.200 7.500l15.600 9M19.800 7.500l-15.600 9M9.500 4.5
   dry:"M12 3v2M12 19v2M3 12h2M19 12h2M5.600 5.600 7 7M17 17l1.400 1.400M18.400 5.600 17 7M7 17l-1.400 1.400M15.500 12a3.500 3.500 0 1 1-7 0 3.500 3.500 0 0 1 7 0z",
   fan:"M12 10.400C10 4 15 2.500 16 6c.700 2.500-2 4-4 4.400M13.600 12c6.400-2 7.900 3 4.400 4-2.500.700-4-2-4.400-4M12 13.600c2 6.400-3 7.900-4 4.400-.700-2.500 2-4 4-4.400M10.400 12c-6.400 2-7.900-3-4.400-4 2.500-.700 4 2 4.400 4",
   auto:"M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM9 16l3-8 3 8M10 13.500h4"};
-const SEGS={mode:[["cool","Cool"],["dry","Dry"],["fan","Fan"],["auto","Auto"]],
-  fan:[["auto","Auto"],["low","Low"],["medium","Medium"],["high","High"],["quiet","Quiet"]],
-  swing:[[0,"Auto"],[1,"1"],[2,"2"],[3,"3"],[4,"4"],[5,"5"]]};
-const AIR={quiet:"1.9s",low:"1.5s",medium:"1.1s",high:".75s",auto:"1.2s"};
+const PILL_ICON={eco:"M5 19c0-9 5-14 15-14 0 10-5 15-13 14M5 19c3-5 6-8 10-10",
+  boost:"M13 3 5 13.500h6L10 21l8-10.500h-6z",
+  clean:"M10 4l1.600 4.400L16 10l-4.400 1.600L10 16l-1.600-4.400L4 10l4.400-1.600zM18 14l.800 2.200L21 17l-2.200.800L18 20l-.800-2.200L15 17l2.200-.800z",
+  display:"M9 18h6M10 21h4M8.500 14.500a6 6 0 1 1 7 0c-.600.500-1 1.200-1 2v.500h-5v-.500c0-.800-.400-1.500-1-2z",
+  sleep:"M20.500 14.500A8.500 8.500 0 1 1 9.500 3.500a7 7 0 0 0 11 11z",
+  "":"M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"};
+const WORD={cool:"Cooling",dry:"Drying",fan:"Fan only",auto:"Auto",heat:"Heating"};
+/* Every option list comes from the selected AC's capabilities, so a brand with
+   no swing control simply never gets that knob. */
+let SEGS={mode:[],fan:[],swing:[]}, capsKey="", TMIN=16, TMAX=30, TSPAN=14;
+const airFor=(fan)=>{
+  const list=SEGS.fan, i=list.findIndex(o=>o[0]===fan);
+  if(i<0||list.length<2) return "1.2s";
+  return (2.1-i*(1.35/(list.length-1))).toFixed(2)+"s";
+};
 let s=null, sel=null, hold=0, tempTimer=null, dragging=false, lastUi="", trackUntil=0, knobTimer={};
 const todOf=h=>h>=6&&h<17?"morning":h<20?"evening":"night";
 const forcedTod=new URLSearchParams(location.search).get("tod");
@@ -898,27 +815,21 @@ function buildInterior(room){
 }
 
 /* ---- controls ---- */
-SEGS.mode.forEach(([value,label])=>{
-  const b=document.createElement("button"); b.setAttribute("aria-pressed","false");
-  b.innerHTML='<span><svg viewBox="0 0 24 24"><path d="'+ICON[value]+'"/></svg></span>'+label;
-  b.onclick=()=>send("mode",value,{mode:value}); $("seg-mode").appendChild(b);
-});
 function setSeg(key,value){
   const box=$("seg-"+key); if(!box) return;
   const i=Math.max(0,SEGS[key].findIndex(o=>o[0]===value));
   [...box.children].forEach((b,n)=>b.setAttribute("aria-pressed",n===i));
 }
 const KSTART=135,KSWEEP=270,KGAP=6,KR=42;
-const KNOBS={fan:{opts:[["auto","Auto"],["quiet","Quiet"],["low","Low"],["medium","Medium"],["high","High"]]},
-             swing:{opts:[[0,"Auto"],[1,"Level 1"],[2,"Level 2"],[3,"Level 3"],[4,"Level 4"],[5,"Level 5"]]}};
+const KNOBS={fan:{opts:[]},swing:{opts:[]}};
 function arcPath(r,a0,a1){
   const rad=a=>a*Math.PI/180, pt=a=>[(50+r*Math.cos(rad(a))).toFixed(2),(50+r*Math.sin(rad(a))).toFixed(2)];
   const [x0,y0]=pt(a0), [x1,y1]=pt(a1);
   return "M"+x0+" "+y0+"A"+r+" "+r+" 0 "+((a1-a0)>180?1:0)+" 1 "+x1+" "+y1;
 }
-for(const key in KNOBS){
-  const k=KNOBS[key]; k.el=$("k-"+key); k.n=k.opts.length; k.step=KSWEEP/k.n;
-  const g=k.el.querySelector(".segs");
+function buildKnob(key,opts){
+  const k=KNOBS[key], g=k.el.querySelector(".segs");
+  k.opts=opts; k.n=opts.length; k.step=KSWEEP/Math.max(1,k.n); g.innerHTML="";
   for(let i=0;i<k.n;i++){
     const path=document.createElementNS("http://www.w3.org/2000/svg","path");
     path.setAttribute("class","seg-base"); path.setAttribute("fill","none");
@@ -929,6 +840,10 @@ for(const key in KNOBS){
     hit.dataset.i=i; g.appendChild(hit);
   }
   k.segs=[...g.querySelectorAll(".seg-base")];
+  k.el.setAttribute("aria-valuemax",Math.max(0,k.n-1));
+}
+for(const key in KNOBS){
+  const k=KNOBS[key]; k.el=$("k-"+key); k.n=0; k.step=KSWEEP; k.segs=[]; k.opts=[];
   const pick=target=>{
     const hit=target&&target.closest?target.closest(".seg-hit"):null;
     if(hit&&k.el.contains(hit)) applyKnob(key,k.opts[+hit.dataset.i][0]);
@@ -939,6 +854,49 @@ for(const key in KNOBS){
   };
   k.el.onpointermove=e=>{ if(dragging) pick(document.elementFromPoint(e.clientX,e.clientY)); };
   k.el.onpointerup=k.el.onpointercancel=k.el.onpointerleave=()=>{dragging=false;};
+}
+
+/* Rebuild every control from what the selected AC reports it can do. */
+function applyCaps(caps){
+  const key=JSON.stringify(caps); if(key===capsKey) return; capsKey=key;
+  SEGS={mode:caps.modes||[],fan:caps.fan||[],swing:caps.swing||[]};
+  TMIN=caps.temp.min; TMAX=caps.temp.max; TSPAN=Math.max(1,TMAX-TMIN);
+  $("dial").setAttribute("aria-valuemin",TMIN); $("dial").setAttribute("aria-valuemax",TMAX);
+
+  const modes=$("seg-mode"); modes.innerHTML="";
+  SEGS.mode.forEach(([value,label])=>{
+    const b=document.createElement("button"); b.setAttribute("aria-pressed","false");
+    b.innerHTML='<span><svg viewBox="0 0 24 24"><path d="'+(ICON[value]||ICON.auto)+'"/></svg></span>'+label;
+    b.onclick=()=>send("mode",value,{mode:value}); modes.appendChild(b);
+  });
+  modes.hidden=!SEGS.mode.length;
+
+  buildKnob("fan",SEGS.fan); buildKnob("swing",SEGS.swing);
+  $("w-fan").hidden=!SEGS.fan.length; $("w-swing").hidden=!SEGS.swing.length;
+  $("knobs").hidden=!SEGS.fan.length&&!SEGS.swing.length;
+  document.querySelector(".rule").hidden=$("knobs").hidden&&!((caps.presets||[]).length+(caps.toggles||[]).length);
+  $("knobs").style.gridTemplateColumns=(SEGS.fan.length&&SEGS.swing.length)?"1fr 1fr":"1fr";
+
+  const pills=$("pills"); pills.innerHTML="";
+  const add=(id,label,icon,onclick)=>{
+    const b=document.createElement("button");
+    b.className="tile"; b.id=id; b.setAttribute("aria-pressed","false");
+    b.innerHTML='<i><svg viewBox="0 0 24 24"><path d="'+icon+'"/></svg></i><div><b>'+label+'</b><small></small></div>';
+    b.onclick=onclick; pills.appendChild(b);
+  };
+  (caps.presets||[]).forEach(([value,label])=>
+    add("p-"+value,label,PILL_ICON[value]||PILL_ICON[""],()=>{
+      const d=cur(); if(!d) return; const on=d.preset!==value;
+      send("preset",on?value:"none",on&&value==="eco"?{preset:value,temp:Math.min(TMAX,26)}:{preset:on?value:"none"});
+    }));
+  (caps.toggles||[]).forEach(([value,label])=>
+    add("t-"+value,label,PILL_ICON[value]||PILL_ICON[""],()=>{
+      const d=cur(); if(!d) return; const on=!d.toggles[value];
+      send(value,on,{toggles:Object.assign({},d.toggles,{[value]:on})});
+    }));
+  const count=(caps.presets||[]).length+(caps.toggles||[]).length;
+  pills.hidden=!count;
+  pills.style.gridTemplateColumns=count===1?"1fr":"1fr 1fr";
 }
 function setKnob(key,value){
   const k=KNOBS[key], i=Math.max(0,k.opts.findIndex(o=>o[0]===value));
@@ -958,18 +916,18 @@ function engage(el,on){
   el.classList.toggle("eng",on);
   $("hint").textContent=on?"Arrows to adjust · Enter to confirm":"Arrows to move · Enter to select";
 }
-const labelOf=(key,value)=>{const o=SEGS[key].find(x=>x[0]===value); return o?o[1]:String(value);};
-const cycle=key=>()=>{const d=cur(); if(!d) return; const list=SEGS[key], i=list.findIndex(x=>x[0]===d[key]), v=list[(i+1)%list.length][0]; send(key,v,{[key]:v});};
-const STATE_WORD={cool:"Cooling",dry:"Drying",fan:"Fan only",auto:"Auto"};
+const labelOf=(key,value)=>{const o=(SEGS[key]||[]).find(x=>x[0]===value); return o?o[1]:"";};
 const STOPS=[[47,140,255],[122,92,250],[240,106,140]];
 function tint(p){
   const x=Math.min(.9999,Math.max(0,p))*2, i=Math.floor(x), f=x-i;
   return STOPS[i].map((v,k)=>Math.round(v+(STOPS[i+1][k]-v)*f)).join(",");
 }
-const whole=t=>t==null?null:Math.min(30,Math.max(16,Math.round(t)));
-function fit(on){
-  const key="560|"+sel;
-  if(key!==lastUi){lastUi=key; api("/ui",{height:560,selected:sel}).catch(()=>{lastUi="";});}
+const whole=t=>t==null?null:Math.min(TMAX,Math.max(TMIN,Math.round(t)));
+function fit(){
+  const hud=$("hud");
+  const h=Math.max(470,Math.min(700,Math.ceil(hud.offsetTop+hud.offsetHeight+24)));
+  const key=h+"|"+sel;
+  if(key!==lastUi){lastUi=key; api("/ui",{height:h,selected:sel}).catch(()=>{lastUi="";});}
 }
 
 function render(){
@@ -997,15 +955,16 @@ function render(){
     r.pin.className="pin"+(dev.power?" on":"")+(dev.id===sel?" sel":"");
     r.pin.innerHTML=TITLE[name]+"<em>"+(dev.power?(t==null?"On":t+"°"):"Off")+"</em>";
     r.pin.setAttribute("aria-pressed",dev.id===sel);
-    r.el.style.setProperty("--air",AIR[dev.fan]||"1.2s");
+    r.el.style.setProperty("--air",airFor(dev.fan));
   });
+  applyCaps(d.caps);
   if($("world").dataset.focus!==d.room){ $("world").dataset.focus=d.room; }
   if($("iw").dataset.room!==d.room) buildInterior(d.room);
   track();
 
-  const t=whole(d.temp), pct=t==null?0:(t-16)/14, c=tint(pct), root=document.documentElement.style;
+  const t=whole(d.temp), pct=t==null?0:(t-TMIN)/TSPAN, c=tint(pct), root=document.documentElement.style;
   root.setProperty("--tc","rgb("+c+")"); root.setProperty("--tg","rgba("+c+",.14)");
-  root.setProperty("--air",AIR[d.fan]||"1.2s");
+  root.setProperty("--air",airFor(d.fan));
   const wasOff=$("panel").classList.contains("off");
   $("panel").classList.toggle("off",!d.power);
   $("power").classList.toggle("on",d.power); $("power").setAttribute("aria-pressed",d.power);
@@ -1013,15 +972,25 @@ function render(){
   $("status").classList.toggle("on",d.online); $("status-t").textContent=d.online?"Online":"Offline";
   $("temp").textContent=t==null?"--":t;
   $("aclcd").innerHTML=(t==null?"--":t)+'<sup style="font-size:9px">°</sup>';
-  const room=d.room_temp==null?"":"Room "+Math.round(d.room_temp)+"°";
+  const room=(!d.caps.room_temp||d.room_temp==null)?"":"Room "+Math.round(d.room_temp)+"°";
   $("room-t").textContent=room;
   $("offnote").textContent=TITLE[d.room]+" AC is off."+(room?" "+room.replace("Room","Room is")+".":"")+" Press power to step inside.";
   setSeg("mode",d.mode);
-  setKnob("fan",d.fan); setKnob("swing",d.swing);
+  if(SEGS.fan.length) setKnob("fan",d.fan);
+  if(SEGS.swing.length) setKnob("swing",d.swing);
   $("k-fan").classList.toggle("fanspin",d.power&&d.mode!=="dry");
-  $("c-eco").setAttribute("aria-pressed",d.preset==="eco"); $("v-eco").textContent=d.preset==="eco"?"On":"Off";
-  $("c-boost").setAttribute("aria-pressed",d.preset==="boost"); $("v-boost").textContent=d.preset==="boost"?"On":"Off";
-  $("state-icon").setAttribute("d",ICON[d.mode]||ICON.auto); $("state-t").textContent=STATE_WORD[d.mode]||"On";
+  (d.caps.presets||[]).forEach(([value])=>{
+    const b=$("p-"+value); if(!b) return;
+    const on=d.preset===value;
+    b.setAttribute("aria-pressed",on); b.querySelector("small").textContent=on?"On":"Off";
+  });
+  (d.caps.toggles||[]).forEach(([value])=>{
+    const b=$("t-"+value); if(!b) return;
+    const on=!!(d.toggles||{})[value];
+    b.setAttribute("aria-pressed",on); b.querySelector("small").textContent=on?"On":"Off";
+  });
+  $("state-icon").setAttribute("d",ICON[d.mode]||ICON.auto);
+  $("state-t").textContent=WORD[d.mode]||labelOf("mode",d.mode)||"On";
   $("hud-name").textContent=TITLE[d.room]+" AC";
   $("arc").style.strokeDasharray=(pct*100)+" 100";
   $("knob").style.transform="rotate("+(135+pct*270)+"deg)";
@@ -1039,19 +1008,15 @@ function send(action,value,patch){
 }
 function setTemp(t,now){
   const d=cur(); if(!d) return;
-  t=Math.min(30,Math.max(16,Math.round(t)));
+  t=Math.min(TMAX,Math.max(TMIN,Math.round(t)));
   d.temp=t; hold=Date.now()+4000; render();
   clearTimeout(tempTimer);
   const id=d.id;
   tempTimer=setTimeout(()=>{hold=Date.now()+4000; api("/cmd",{id,action:"temp",value:t}).catch(()=>{hold=0;});},now?0:450);
 }
-const preset=name=>()=>{const d=cur(); if(!d) return; const on=d.preset!==name;
-  send("preset",on?name:"none",on&&name==="eco"?{preset:name,temp:26}:{preset:on?name:"none"});};
-
 $("power").onclick=()=>{const d=cur(); if(d) send("power",!d.power,{power:!d.power});};
 $("minus").onclick=()=>setTemp((cur().temp||24)-1);
 $("plus").onclick=()=>setTemp((cur().temp||24)+1);
-$("c-eco").onclick=preset("eco"); $("c-boost").onclick=preset("boost");
 $("power2").onclick=$("power").onclick;
 $("title").onclick=()=>{const open=$("menu").classList.toggle("show"); $("title").setAttribute("aria-expanded",open);};
 $("m-bedroom").onclick=()=>{choose("bedroom"); $("menu").classList.remove("show"); $("title").setAttribute("aria-expanded",false);};
@@ -1062,7 +1027,7 @@ function polar(e){
   const r=dial.getBoundingClientRect(), k=r.width/200, dx=e.clientX-(r.left+100*k), dy=e.clientY-(r.top+92*k);
   let rel=(Math.atan2(dy,dx)*180/Math.PI-135+720)%360;
   if(rel>270) rel=rel>315?0:270;
-  return {dist:Math.hypot(dx,dy)/k, temp:16+14*rel/270};
+  return {dist:Math.hypot(dx,dy)/k, temp:TMIN+TSPAN*rel/270};
 }
 dial.onpointerdown=e=>{
   const p=polar(e); if(p.dist<50||p.dist>98) return;
