@@ -13,7 +13,12 @@ its own to whatever that unit can do.
 
 | Morning | Evening | Night |
 |---|---|---|
-| ![Morning](docs/theme-morning.png) | ![Evening](docs/theme-evening.png) | ![Night](docs/theme-night.png) |
+| ![The panel in the morning theme](docs/theme-morning.png) | ![The panel in the evening theme](docs/theme-evening.png) | ![The panel in the night theme](docs/theme-night.png) |
+
+With the air conditioner off, the panel shows the whole home instead, and you
+pick a room to step into:
+
+![The home overview shown while the units are off](docs/room-overview.png)
 
 ---
 
