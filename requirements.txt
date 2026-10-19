@@ -1,0 +1,7 @@
+# Core runtime. Python 3.9 or newer.
+aiohttp>=3.9,<4                  # the panel's local web server
+pyobjc-framework-WebKit>=10,<12  # macOS menubar popover (pulls in pyobjc-core)
+
+# Brand drivers declare their own dependencies in ACDriver.requires.
+# Install the ones for the brands you actually use:
+miraie-ac-in>=1.1.8,<2           # Panasonic MirAIe

@@ -291,7 +291,29 @@ def run_menubar(url):
 
 # --------------------------------------------------------------------- main
 
+def load_env_file(path=".env"):
+    """Read KEY=value lines from .env, if present.
+
+    Variables already set in the environment win, so the launcher and the
+    shell keep precedence. Nothing is written back to disk.
+    """
+    try:
+        with open(path) as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def main():
+    load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
     brand = "demo" if "--demo" in sys.argv else acbrands.selected_brand()
 
     sock = socket.socket()
