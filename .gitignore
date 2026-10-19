@@ -1,0 +1,60 @@
+# --- Credentials & secrets: never commit ---
+lan_token
+*.token
+.env
+.env.*
+!.env.example
+secrets.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.keychain
+*.keychain-db
+id_rsa*
+id_ed25519*
+
+# --- Python ---
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs & runtime state ---
+*.log
+ac_panel.log
+
+# --- Build artifacts & distribution ---
+build/
+dist/
+*.spec
+*.dmg
+*.pkg
+
+# --- Backups & editor scratch files ---
+*.bak
+*.orig
+*.rej
+*.tmp
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon?
+.Spotlight-V100
+.Trashes

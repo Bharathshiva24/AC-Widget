@@ -1,0 +1,27 @@
+#!/bin/bash
+# Launches the AC menubar app without a Terminal window.
+DIR="$HOME/ac-control"
+say_and_quit() { /usr/bin/osascript -e "display dialog \"$1\" with title \"AC\" buttons {\"OK\"} default button 1" >/dev/null 2>&1; exit 1; }
+
+/usr/bin/pgrep -f "$DIR/ac_panel.py" >/dev/null && exit 0
+[ -x "$DIR/venv/bin/python" ] || say_and_quit "Can't find the app's files in $DIR."
+
+MIRAIE_MOBILE="$(/usr/bin/security find-generic-password -s ac-panel -a mobile -w 2>/dev/null)"
+MIRAIE_PASSWORD="$(/usr/bin/security find-generic-password -s ac-panel -a password -w 2>/dev/null)"
+[ -n "$MIRAIE_MOBILE" ] && [ -n "$MIRAIE_PASSWORD" ] || say_and_quit "Your MirAIe login isn't saved yet. Open Terminal and run: bash ~/ac-control/setup.sh"
+export MIRAIE_MOBILE MIRAIE_PASSWORD
+
+# TV access: a fixed port and a private token the TV launcher uses to reach this app on the home Wi-Fi.
+AC_LAN_PORT=8765
+[ -s "$DIR/lan_token" ] || /usr/bin/openssl rand -hex 16 > "$DIR/lan_token"
+AC_LAN_TOKEN="$(/bin/cat "$DIR/lan_token")"
+export AC_LAN_PORT AC_LAN_TOKEN
+
+cd "$DIR" || exit 1
+echo "$(date "+%Y-%m-%d %H:%M:%S") Launching from the app" >> "$DIR/ac_panel.log"
+# Start the panel as its own background process, the same way it runs from Terminal, then let this launcher finish.
+/usr/bin/env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" TMPDIR="$TMPDIR" LANG="en_US.UTF-8" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  MIRAIE_MOBILE="$MIRAIE_MOBILE" MIRAIE_PASSWORD="$MIRAIE_PASSWORD" AC_LAN_PORT="$AC_LAN_PORT" AC_LAN_TOKEN="$AC_LAN_TOKEN" \
+  /usr/bin/nohup "$DIR/venv/bin/python" "$DIR/ac_panel.py" >> "$DIR/ac_panel.log" 2>&1 &
+disown
+exit 0
