@@ -576,7 +576,7 @@ button:focus{outline:none}
 .veil p{color:var(--soft);-webkit-user-select:text;user-select:text}
 .spin{width:22px;height:22px;border-radius:50%;border:2px solid var(--well);border-top-color:var(--ac);animation:sp .9s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}.spin{animation:none}.air path,.acair path{animation:none}.knob.spin .kface svg{animation:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}.spin{animation:none}.air path,.acair path{animation:none}}
 </style></head>
 <body><div class="panel off" id="panel">
 
@@ -752,25 +752,29 @@ function setSeg(key,value){
    any number of them: --n sizes the sliding highlight, --i positions it. */
 const SELECTORS={fan:{opts:[]},swing:{opts:[]}};
 
-/* Fan speed reads as bars that grow with the airflow; "auto" keeps the circled
-   A used by the mode row. */
+/* Fan speed reads as a four-bar meter: the bars up to this speed are solid and
+   the rest stay as faint outlines, so every option has the same silhouette and
+   only the fill changes. "auto" keeps the circled A used by the mode row. */
 function fanIcon(value,index,total){
   if(value==="auto") return '<path d="'+ICON.auto+'"/>';
   const known={quiet:1,low:2,medium:3,high:4};
-  const bars=known[value]||Math.max(1,Math.min(4,Math.round((index/Math.max(1,total-1))*4)||1));
-  let d="";
-  for(let i=0;i<bars;i++){ const x=(6+i*4.4).toFixed(1), h=5+i*4.2; d+="M"+x+" 19V"+(19-h).toFixed(1); }
-  return '<path d="'+d+'" stroke-linecap="round"/>';
+  const bars=known[value]||Math.max(1,Math.min(4,index||1));
+  let lit="",dim="";
+  for(let i=0;i<4;i++){
+    const segment="M"+(6.4+i*3.7).toFixed(1)+" 18.6V"+(14.6-i*3.6).toFixed(1);
+    if(i<bars) lit+=segment; else dim+=segment;
+  }
+  return '<path d="'+lit+'"/>'+(dim?'<path d="'+dim+'" opacity=".3"/>':"");
 }
 
-/* Swing shows the louver angle: a fixed unit above, an arrow that rotates from
-   almost horizontal to straight down. "auto" is the sweeping double arrow. */
+/* Swing shows the louver itself: the unit's lip stays put above while the vane
+   below tilts from flat to steeply down. "auto" is the vane sweeping both ways. */
 function swingIcon(value,index,total){
+  const lip='<path d="M5.5 5.5h13"/>';
   if(value===0||value==="auto"||value==="0")
-    return '<path d="M4 4h16"/><path d="M12 8v11M8.500 11.500 12 8l3.500 3.500M8.500 15.500 12 19l3.500-3.500"/>';
-  const levels=Math.max(1,total-1), step=60/Math.max(1,levels-1), angle=-60+(index-1)*step;
-  return '<path d="M4 4h16"/><g transform="rotate('+angle.toFixed(1)+' 12 8)">'+
-         '<path d="M12 8v10M8.500 14.500 12 18l3.500-3.500"/></g>';
+    return lip+'<path d="M6 13.5h12"/><path d="M9.4 9.6 12 7l2.6 2.6M9.4 17.4 12 20l2.6-2.6"/>';
+  const levels=Math.max(2,total-1), angle=10+(index-1)*(62/(levels-1));
+  return lip+'<g transform="rotate('+angle.toFixed(1)+' 12 13.5)"><path d="M6 13.5h12"/></g>';
 }
 const SEL_ICON={fan:fanIcon,swing:swingIcon};
 
@@ -962,7 +966,6 @@ function focusables(){
     const r=b.getBoundingClientRect(); if(r.width<4||r.height<4) return false;
     const off=$("panel").classList.contains("off");
     if(off&&b.closest(".hud")) return false;
-    if(!off&&b.classList.contains("pin")) return false;
     if(b.closest(".menu")&&!$("menu").classList.contains("show")) return false;
     if(b.closest(".head")&&!off) return false;
     const cs=getComputedStyle(b); if(cs.visibility==="hidden"||cs.pointerEvents==="none") return false;

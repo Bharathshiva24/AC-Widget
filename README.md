@@ -15,10 +15,10 @@ its own to whatever that unit can do.
 |---|---|---|
 | ![The panel in the morning theme](docs/theme-morning.png) | ![The panel in the evening theme](docs/theme-evening.png) | ![The panel in the night theme](docs/theme-night.png) |
 
-With the air conditioner off, the panel shows the whole home instead, and you
-pick a room to step into:
+With the air conditioner off, the room stays on screen and simply goes quiet:
+the airflow, the glow and the unit's own display fade out, and the vent closes.
 
-![The home overview shown while the units are off](docs/room-overview.png)
+![The room with the air conditioner switched off](docs/room-off.png)
 
 ---
 
