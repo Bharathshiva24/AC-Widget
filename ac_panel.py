@@ -201,7 +201,10 @@ def _projector_ping(host):
     if binary is None:
         return None, "ping missing"
     try:
-        done = subprocess.run([binary, "-c", "1", "-t", "2", host],
+        # Two packets, capped at two seconds: a live projector answers the
+        # first in milliseconds, one dropped packet on a busy network does not
+        # read as off, and a projector that has gone is known within the cap.
+        done = subprocess.run([binary, "-c", "2", "-t", "2", host],
                               capture_output=True, timeout=6)
     except FileNotFoundError:
         return None, "ping missing"
@@ -307,7 +310,10 @@ async def watch_inputs():
         # A lid change is always judged against a fresh projector reading.
         # Deciding on a stale one switches the unit off mid-film for a few
         # seconds before the next poll corrects it.
-        if tick % 2 == 0 or was_projector is None or closed != was_closed:
+        # A ping costs one packet, so it runs every pass. adb spawns processes,
+        # so it is spaced out instead.
+        every = 3 if PROJECTOR["method"] == "adb" else 1
+        if tick % every == 0 or was_projector is None or closed != was_closed:
             LID["projector"] = await loop.run_in_executor(None, projector_power)
         tick += 1
         projector = LID["projector"]
