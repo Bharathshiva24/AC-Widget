@@ -603,7 +603,10 @@ async function refresh(){
 }
 window.refresh=refresh;
 const cur=()=>s&&s.connected?(s.devices.find(d=>d.id===sel)||s.devices[0]):null;
-const titleOf=d=>d.name||(d.room?d.room[0].toUpperCase()+d.room.slice(1)+" AC":"Air conditioner");
+const ROOM_LABEL={bedroom:"Bedroom",hall:"Living Room"};
+/* Both units often report the same cloud name ("PANASONIC AC"), so the room
+   is what actually tells them apart. */
+const titleOf=d=>ROOM_LABEL[d.room]||d.name||"Air conditioner";
 
 function choose(id){
   if(!s||!s.connected||id===sel) return;
@@ -649,13 +652,13 @@ function fanIcon(value,index){
   return '<path d="'+lit+'"/>'+(dim?'<path d="'+dim+'" opacity=".3"/>':"");
 }
 /* Swing shows the louver itself: the unit's lip stays put while the vane below
-   tilts from flat to steeply down. "auto" is the vane sweeping both ways. */
+   swings down from its hinge, so the free end drops further at each level.
+   "auto" reuses the circled A, so automatic reads the same across every row. */
 function swingIcon(value,index,total){
-  const lip='<path d="M5.5 5.5h13"/>';
-  if(value===0||value==="auto"||value==="0")
-    return lip+'<path d="M6 13.5h12"/><path d="M9.4 9.6 12 7l2.6 2.6M9.4 17.4 12 20l2.6-2.6"/>';
-  const levels=Math.max(2,total-1), angle=10+(index-1)*(62/(levels-1));
-  return lip+'<g transform="rotate('+angle.toFixed(1)+' 12 13.5)"><path d="M6 13.5h12"/></g>';
+  const lip='<path d="M5.500 5.500h13"/>';
+  if(value===0||value==="auto"||value==="0") return '<path d="'+ICON.auto+'"/>';
+  const levels=Math.max(2,total-1), angle=6+(index-1)*(60/(levels-1));
+  return lip+'<g transform="rotate('+angle.toFixed(1)+' 6.500 11)"><path d="M6.500 11h11"/></g>';
 }
 const SEL_ICON={fan:fanIcon,swing:swingIcon};
 

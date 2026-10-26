@@ -211,8 +211,8 @@ install.sh             re-install the app without touching credentials
   and the panel itself are portable, but the shell around them is not.
 - **Unofficial integrations.** Cloud drivers talk to manufacturer services that
   have no published API. A vendor change can break them without notice.
-- **Two rooms.** Units are mapped to a bedroom and a hall. More than two are
-  read and controllable, but only the first two are named.
+- **Two rooms.** Units are mapped to a bedroom and a living room. More than
+  two are read and controllable, but only the first two are named.
 - **MirAIe capability set.** Heat mode, the self-clean preset and the display
   toggle exist in the underlying library but are left out, because the units
   this was tested against ignore them. They are one line each to enable in
