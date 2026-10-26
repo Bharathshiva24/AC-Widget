@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -38,7 +39,7 @@ LID = {"closed": None, "projector": None}
 # power state is read from the Google TV side instead. "ping" treats presence on
 # the network as running; "adb" asks Android whether the display is awake, which
 # is accurate but needs network debugging enabled on the projector.
-PROJECTOR = {"host": None, "method": "ping"}
+PROJECTOR = {"host": None, "method": "ping", "detail": ""}
 
 
 # ---------------------------------------------------------------- AC state
@@ -167,40 +168,85 @@ def parse_wakefulness(text):
     return None
 
 
+# The launcher starts the app with a minimal PATH, so these are found by
+# looking rather than by relying on the shell.
+PING_PATHS = ("/sbin/ping", "/bin/ping", "/usr/bin/ping")
+ADB_PATHS = ("/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/usr/bin/adb",
+             "~/Library/Android/sdk/platform-tools/adb")
+
+
+def first_existing(paths):
+    for path in paths:
+        path = os.path.expanduser(path)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def adb_binary():
+    found = os.environ.get("AC_ADB")
+    if found and os.path.exists(found):
+        return found
+    return first_existing(ADB_PATHS) or shutil.which("adb")
+
+
 def _projector_ping(host):
     """Presence on the network stands in for running, absence for off.
 
-    Crude but needs nothing enabled on the projector. It only tells the truth if
-    the unit actually leaves the network in standby, which is worth confirming
-    before trusting it.
+    Crude but needs nothing installed or enabled. It only tells the truth if the
+    projector actually leaves the network in standby; many Google TV devices
+    stay connected to listen for casts, and then this can never report off.
     """
+    binary = first_existing(PING_PATHS) or shutil.which("ping")
+    if binary is None:
+        return None, "ping missing"
     try:
-        done = subprocess.run(["/sbin/ping", "-c", "1", "-t", "2", host],
-                              capture_output=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.returncode == 0
+        done = subprocess.run([binary, "-c", "1", "-t", "2", host],
+                              capture_output=True, timeout=6)
+    except FileNotFoundError:
+        return None, "ping missing"
+    except subprocess.TimeoutExpired:
+        return False, "no reply"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)[:50]
+    return (True, "replied") if done.returncode == 0 else (False, "no reply")
 
 
 def _projector_adb(host):
-    """Ask Google TV whether its display is awake. Accurate, but needs network
-    debugging turned on in the projector's developer options."""
+    """Ask Google TV whether its display is awake. Accurate through standby,
+    but needs network debugging enabled in the projector's developer options."""
+    binary = adb_binary()
+    if binary is None:
+        return None, "adb not installed"
     target = host + ":5555"
     try:
-        subprocess.run(["adb", "connect", target], capture_output=True, timeout=6)
-        done = subprocess.run(["adb", "-s", target, "shell", "dumpsys", "power"],
-                              capture_output=True, text=True, timeout=8)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return parse_wakefulness(done.stdout) if done.returncode == 0 else None
+        subprocess.run([binary, "connect", target], capture_output=True, timeout=10)
+        done = subprocess.run([binary, "-s", target, "shell", "dumpsys", "power"],
+                              capture_output=True, text=True, timeout=12)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)[:50]
+    if done.returncode != 0:
+        return None, (done.stderr or "").strip().splitlines()[-1][:50] if done.stderr else "adb unreachable"
+    awake = parse_wakefulness(done.stdout)
+    if awake is None:
+        return None, "no power state reported"
+    return awake, "awake" if awake else "asleep"
 
 
 def projector_power():
-    """True running, False off, None when there is no way to tell."""
+    """True running, False off, None when there is no way to tell.
+
+    The reason is kept alongside, so a projector that never reads as off can be
+    told apart from one that cannot be reached at all.
+    """
     host = PROJECTOR["host"]
     if not host:
+        PROJECTOR["detail"] = "not configured"
         return None
-    return (_projector_adb if PROJECTOR["method"] == "adb" else _projector_ping)(host)
+    probe = _projector_adb if PROJECTOR["method"] == "adb" else _projector_ping
+    state, detail = probe(host)
+    PROJECTOR["detail"] = detail
+    return state
 
 
 def decide(lid_closed, projector_on):
@@ -268,6 +314,10 @@ async def watch_inputs():
         LID["closed"] = closed
         if was_closed is None:               # the first pass only sets a baseline
             continue
+        if projector != was_projector:
+            log("Projector reads %s (%s: %s)"
+                % ({True: "on", False: "off"}.get(projector, "unknown"),
+                   PROJECTOR["method"], PROJECTOR["detail"]))
         if (closed, projector) != (was_closed, was_projector):
             await apply_state(decide(closed, projector), "watch")
 
@@ -380,7 +430,8 @@ def build_app(port):
                 "lid_closed": LID["closed"],
                 "projector_on": LID["projector"],
                 "projector_host": PROJECTOR["host"],
-                "projector_method": PROJECTOR["method"]}
+                "projector_method": PROJECTOR["method"],
+                "projector_detail": PROJECTOR["detail"]}
 
     async def settings(request):
         if request.method == "POST":
@@ -1140,8 +1191,9 @@ function paintSettings(){
     ? "Lid tracking is only available on macOS."
     : !settings.projector_host
       ? "No projector configured, so the lid decides on its own. Add its address to config.json to include it."
-      : "Applies to the unit shown in the panel. Projector read by "+
-        settings.projector_method+" at "+settings.projector_host+".";
+      : "Projector at "+settings.projector_host+" read by "+settings.projector_method+
+        (settings.projector_detail?" — "+settings.projector_detail:"")+
+        ". Automation applies to the unit shown in the panel.";
 }
 async function loadSettings(){
   try{ settings=await api("/settings"); }catch(e){}
