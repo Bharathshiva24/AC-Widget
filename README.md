@@ -56,20 +56,20 @@ there is no bundler and no front-end framework.
 - Multiple units are supported, switched from the name dropdown in the header.
 
 **Automatic control**
-- Optional: the air conditioner runs while the MacBook lid is open **or** a
-  projector is on, and switches off only once both are off.
+- Optional: the air conditioner switches on when the MacBook lid opens and off
+  when it closes.
 - Off by default, turned on from the settings panel behind the gear icon, which
-  also shows both inputs live so you can see what it is reacting to.
+  also shows the lid live so you can see what it is reacting to.
 - Acts on the unit currently shown in the panel, so changing units moves the
   automation with it.
 - Reacts to changes rather than reconciling continuously, so switching a unit
-  off by hand stays off until the lid or the projector actually moves.
+  off by hand stays off until the lid actually moves.
 - The lid is read two ways, because neither alone is enough: the system sleep
   and wake notifications, and the clamshell flag macOS uses itself. The second
   catches a lid closed in clamshell mode, where the Mac stays awake on an
   external display and never posts a sleep notification.
-- When the projector's state cannot be read, nothing is switched off. Leaving a
-  unit running is the cheaper mistake.
+- When the lid cannot be read at all, nothing is switched. Leaving a unit as
+  the person set it is the cheaper mistake.
 
 **Appearance**
 - Follows the macOS light or dark setting, using the system accent blue.
@@ -151,46 +151,6 @@ then `.env`, then the Keychain.
 | `AC_LAN_PORT`, `AC_LAN_TOKEN` | Enable network access (both required) |
 | `AC_SWAP_ROOMS` | Swap which unit is the bedroom and which the hall |
 | `AC_DEMO_CAPS` | Demo brand: `minimal` for a reduced-capability unit |
-| `AC_PROJECTOR_HOST`, `AC_PROJECTOR_METHOD` | Projector address, and how to read it |
-
-### Projector (optional)
-
-Automation can include a projector, so a film keeps the air conditioner running
-with the lid shut. Add its address to `config.json`:
-
-```json
-{
-  "brand": "miraie",
-  "lid_control": true,
-  "projector": { "host": "192.168.1.50", "method": "ping" }
-}
-```
-
-Find the address in your router's client list, or on the projector under
-network settings.
-
-| Method | How it reads the projector | Setup |
-|---|---|---|
-| `ping` | Presence on the network counts as running | None |
-| `adb` | Asks Google TV whether its display is awake | Network debugging, plus `adb` on your Mac |
-
-The Epson EpiqVision Mini range, the EF-21W included, has no LAN port and
-supports neither PJLink nor ESC/VP.net, so there is no projector protocol to
-ask. Both methods read the Google TV side instead.
-
-`ping` is only truthful if your projector actually leaves the network when it
-is off. Many Google TV devices stay connected in standby to listen for casts,
-in which case ping always reports *on* and the unit never switches off. Check
-it: with the projector off, the Projector chip in Settings should read `off`
-within about ten seconds. If it stays on, use `adb` instead:
-
-```bash
-brew install --cask android-platform-tools
-adb connect 192.168.1.50:5555     # then accept the prompt on the projector
-```
-
-Then set `"method": "adb"`. This reads Android's own wakefulness, so standby
-reads as off even while the projector stays on the network.
 
 ### Files
 
@@ -275,14 +235,10 @@ install.sh             re-install the app without touching credentials
   toggle exist in the underlying library but are left out, because the units
   this was tested against ignore them. They are one line each to enable in
   `acbrands/miraie.py`.
-- **Automation needs the app running.** It is the panel that reacts to the lid
-  and the projector, so nothing is sent if it is not running when they move.
-  Closing the lid on battery sleeps the Mac within moments: the off command
+- **Automation needs the app running.** It is the panel that reacts to the lid,
+  so nothing is sent if it is not running when the lid moves. Closing the lid on battery sleeps the Mac within moments: the off command
   goes out from the sleep notification, which normally wins that race but
   cannot be guaranteed on a slow or dropped connection.
-- **Projector state is inferred, not reported.** The EpiqVision Mini exposes no
-  control protocol, so both methods read the Google TV side. See
-  [Projector](#projector-optional) for which one to trust.
 - **No scheduling.** Beyond the lid, this is a controller, not a thermostat.
 
 ## Security considerations
