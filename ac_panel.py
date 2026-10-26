@@ -30,10 +30,15 @@ ROOM_WORDS = {"bedroom": ("bed", "master"), "hall": ("hall", "living", "drawing"
 
 # Settings the person can change from the panel, persisted in config.json.
 SETTINGS = {"lid_control": False}
-# What the lid was doing last time we looked. None means "not established yet",
-# which is deliberately not actionable: starting the app with the lid open must
-# not read as the lid having just been opened.
-LID = {"closed": None}
+# What the inputs were doing last time we looked. None means "not established
+# yet", which is deliberately not actionable: starting the app with the lid
+# open must not read as the lid having just been opened.
+LID = {"closed": None, "projector": None}
+# The Epson EpiqVision Mini has no LAN port and no PJLink or ESC/VP.net, so its
+# power state is read from the Google TV side instead. "ping" treats presence on
+# the network as running; "adb" asks Android whether the display is awake, which
+# is accurate but needs network debugging enabled on the projector.
+PROJECTOR = {"host": None, "method": "ping"}
 
 
 # ---------------------------------------------------------------- AC state
@@ -112,14 +117,20 @@ def chosen_device():
 
 
 def load_settings():
-    SETTINGS["lid_control"] = bool(acbrands.read_config().get("lid_control", False))
+    config = acbrands.read_config()
+    SETTINGS["lid_control"] = bool(config.get("lid_control", False))
+    projector = config.get("projector") or {}
+    PROJECTOR["host"] = (os.environ.get("AC_PROJECTOR_HOST")
+                         or projector.get("host") or None)
+    PROJECTOR["method"] = (os.environ.get("AC_PROJECTOR_METHOD")
+                           or projector.get("method") or "ping").lower()
 
 
 def save_settings(**values):
     SETTINGS.update({k: bool(v) for k, v in values.items()})
     acbrands.write_config(**{k: bool(v) for k, v in values.items()})
     # Re-establish the baseline so re-enabling never fires on a stale reading.
-    LID["closed"] = None
+    LID["closed"] = LID["projector"] = None
 
 
 def parse_clamshell(text):
@@ -147,61 +158,140 @@ def clamshell_closed():
     return parse_clamshell(done.stdout) if done.returncode == 0 else None
 
 
-async def apply_lid(closed, source):
-    """Mirror the lid into the selected unit: open turns it on, shut turns it off."""
-    if not SETTINGS["lid_control"]:
+def parse_wakefulness(text):
+    """Read Android's own power state out of `dumpsys power`."""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("mWakefulness="):
+            return line.split("=", 1)[1].strip().split()[0] == "Awake"
+    return None
+
+
+def _projector_ping(host):
+    """Presence on the network stands in for running, absence for off.
+
+    Crude but needs nothing enabled on the projector. It only tells the truth if
+    the unit actually leaves the network in standby, which is worth confirming
+    before trusting it.
+    """
+    try:
+        done = subprocess.run(["/sbin/ping", "-c", "1", "-t", "2", host],
+                              capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode == 0
+
+
+def _projector_adb(host):
+    """Ask Google TV whether its display is awake. Accurate, but needs network
+    debugging turned on in the projector's developer options."""
+    target = host + ":5555"
+    try:
+        subprocess.run(["adb", "connect", target], capture_output=True, timeout=6)
+        done = subprocess.run(["adb", "-s", target, "shell", "dumpsys", "power"],
+                              capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_wakefulness(done.stdout) if done.returncode == 0 else None
+
+
+def projector_power():
+    """True running, False off, None when there is no way to tell."""
+    host = PROJECTOR["host"]
+    if not host:
+        return None
+    return (_projector_adb if PROJECTOR["method"] == "adb" else _projector_ping)(host)
+
+
+def decide(lid_closed, projector_on):
+    """What the air conditioner should be doing, from the two inputs.
+
+    It runs while either the lid is open or the projector is on, and stops only
+    when both are off. None means there is not enough information to act, which
+    leaves whatever the person last chose alone — the safe way to fail, since
+    switching a unit off during a film is worse than leaving it running.
+    """
+    if lid_closed is None:
+        return None
+    if not lid_closed:
+        return True
+    if projector_on is True:
+        return True
+    if projector_on is False:
+        return False
+    return None
+
+
+async def apply_state(want, source):
+    """Switch the selected unit, unless it is already where it should be."""
+    if want is None or not SETTINGS["lid_control"]:
         return
     device = chosen_device()
     if device is None or STATE["driver"] is None:
         return
-    want = not closed
     try:
         if bool(device.snapshot().get("power")) == want:
             return
         await STATE["driver"].command(device, "power", want)
     except Exception as exc:                 # never let automation take the app down
-        log("Lid %s (%s): could not switch %s: %s"
-            % ("closed" if closed else "opened", source, device.name, exc))
+        log("Automation (%s): could not switch %s: %s" % (source, device.name, exc))
         return
-    log("Lid %s (%s): %s switched %s"
-        % ("closed" if closed else "opened", source, device.name, "on" if want else "off"))
+    log("Automation (%s): %s switched %s" % (source, device.name, "on" if want else "off"))
 
 
-async def watch_lid():
-    """Poll the clamshell flag and act on changes.
+async def watch_inputs():
+    """Act when either input changes.
 
-    Polling covers the case sleep notifications miss: a lid closed while the Mac
-    stays awake on an external display.
+    Reacting to changes rather than reconciling continuously is what keeps
+    manual control usable: switching the unit off by hand stays off until the
+    lid or the projector actually does something. Polling also covers the case
+    sleep notifications miss, a lid closed while the Mac stays awake on an
+    external display.
     """
+    tick = 0
     while True:
         await asyncio.sleep(3)
         if not SETTINGS["lid_control"]:
             continue
-        closed = await asyncio.get_event_loop().run_in_executor(None, clamshell_closed)
+        loop = asyncio.get_event_loop()
+        closed = await loop.run_in_executor(None, clamshell_closed)
         if closed is None:
             continue
-        if LID["closed"] is None:            # first reading only establishes a baseline
-            LID["closed"] = closed
+        was_closed, was_projector = LID["closed"], LID["projector"]
+        # A lid change is always judged against a fresh projector reading.
+        # Deciding on a stale one switches the unit off mid-film for a few
+        # seconds before the next poll corrects it.
+        if tick % 2 == 0 or was_projector is None or closed != was_closed:
+            LID["projector"] = await loop.run_in_executor(None, projector_power)
+        tick += 1
+        projector = LID["projector"]
+        LID["closed"] = closed
+        if was_closed is None:               # the first pass only sets a baseline
             continue
-        if closed != LID["closed"]:
-            LID["closed"] = closed
-            await apply_lid(closed, "lid")
+        if (closed, projector) != (was_closed, was_projector):
+            await apply_state(decide(closed, projector), "watch")
 
 
 def lid_event(closed, source):
     """Called from the AppKit thread when macOS is about to sleep or has woken.
 
-    Closing the lid usually sleeps the Mac before the poll above can run, so the
-    sleep notification is what actually catches it. We block briefly on the way
-    down to give the command time to leave the machine.
+    Closing the lid sleeps the Mac before the poll above could notice, so this
+    is what catches it in practice. The handler blocks briefly on the way down
+    so the command has time to leave the machine.
     """
     loop = STATE["loop"]
     if loop is None or not SETTINGS["lid_control"]:
         return
-    LID["closed"] = closed
+
+    async def run():
+        projector = LID["projector"]
+        if closed:            # re-read: a film may have started since the last poll
+            projector = await asyncio.get_event_loop().run_in_executor(None, projector_power)
+        LID["closed"], LID["projector"] = closed, projector
+        await apply_state(decide(closed, projector), source)
+
     try:
-        future = asyncio.run_coroutine_threadsafe(apply_lid(closed, source), loop)
-        future.result(timeout=4 if closed else 1.5)
+        asyncio.run_coroutine_threadsafe(run(), loop).result(timeout=6 if closed else 2)
     except Exception:
         pass
 
@@ -286,7 +376,11 @@ def build_app(port):
         return {"lid_control": SETTINGS["lid_control"],
                 "lid_available": sys.platform == "darwin",
                 "target": device.name if device is not None else None,
-                "target_room": room}
+                "target_room": room,
+                "lid_closed": LID["closed"],
+                "projector_on": LID["projector"],
+                "projector_host": PROJECTOR["host"],
+                "projector_method": PROJECTOR["method"]}
 
     async def settings(request):
         if request.method == "POST":
@@ -483,12 +577,14 @@ def main():
             log("TV access could not start: %s" % exc)
 
     asyncio.run_coroutine_threadsafe(connect(brand), loop)
-    asyncio.run_coroutine_threadsafe(watch_lid(), loop)
+    asyncio.run_coroutine_threadsafe(watch_inputs(), loop)
     if brand == "demo":
         print("Demo panel at " + url)
 
-    log("AC started (%s, lid control %s)"
-        % (brand, "on" if SETTINGS["lid_control"] else "off"))
+    log("AC started (%s, automation %s%s)"
+        % (brand, "on" if SETTINGS["lid_control"] else "off",
+           ", projector %s via %s" % (PROJECTOR["host"], PROJECTOR["method"])
+           if PROJECTOR["host"] else ""))
     if brand == "demo" and "--browser" in sys.argv:
         threading.Event().wait()
     else:
@@ -670,6 +766,12 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
 .srow b{display:block;font-size:12.5px;font-weight:590;letter-spacing:-.05px}
 .srow small{display:block;font-size:10.5px;color:var(--label2);margin-top:3px;line-height:1.42}
 .srow[disabled]{opacity:.45;pointer-events:none}
+.status{display:flex;gap:8px}
+.status span{flex:1;display:flex;align-items:center;gap:7px;padding:9px 11px;border-radius:9px;
+  background:var(--well);font-size:10.5px;color:var(--label2)}
+.status b{font-weight:590;color:var(--label);margin-left:auto;font-variant-numeric:tabular-nums}
+.status i{width:7px;height:7px;border-radius:50%;background:var(--label3);flex:none;transition:background .3s}
+.status span.on i{background:#34C759}
 .snote{font-size:10.5px;color:var(--label3);line-height:1.45;padding:0 3px}
 .panel.settings > :not(#sheet):not(#veil):not(.quit){display:none}
 
@@ -755,9 +857,13 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
     <b>Settings</b>
   </div>
   <button class="srow" id="opt-lid" aria-pressed="false">
-    <div><b>Follow MacBook lid</b><small id="lid-copy">Switches the air conditioner on when you open the lid and off when you close it.</small></div>
+    <div><b>Automatic control</b><small id="lid-copy">Keeps the air conditioner running while the lid is open or the projector is on.</small></div>
     <span class="sw"><i></i></span>
   </button>
+  <div class="status" id="auto-status" hidden>
+    <span id="chip-lid"><i></i>Lid<b id="st-lid">—</b></span>
+    <span id="chip-proj"><i></i>Projector<b id="st-proj">—</b></span>
+  </div>
   <p class="snote" id="lid-note" hidden></p>
 </div>
 
@@ -796,6 +902,7 @@ async function api(path,body){
 async function refresh(){
   if(Date.now()<hold||dragging) return;
   try{ const n=await api("/state"); if(Date.now()<hold||dragging) return; s=n; render(); }catch(e){}
+  if(typeof sheetOpen==="function"&&sheetOpen()) loadSettings();
 }
 window.refresh=refresh;
 const cur=()=>s&&s.connected?(s.devices.find(d=>d.id===sel)||s.devices[0]):null;
@@ -1017,12 +1124,24 @@ function paintSettings(){
   row.setAttribute("aria-pressed",!!settings.lid_control);
   row.disabled=!settings.lid_available;
   const who=ROOM_LABEL[settings.target_room]||settings.target||"the air conditioner";
-  $("lid-copy").textContent="Switches "+who+" on when you open the lid and off when you close it.";
+  $("lid-copy").textContent="Keeps "+who+" running while the lid is open or the projector is on, "+
+    "and switches it off once both are off.";
+  $("auto-status").hidden=!settings.lid_available;
+  const chip=(spanId,valueId,state,yes,no)=>{
+    $(valueId).textContent=state===true?yes:state===false?no:"unknown";
+    $(spanId).className=state===true?"on":"";
+  };
+  const lidOpen=(settings.lid_closed===null||settings.lid_closed===undefined)?null:!settings.lid_closed;
+  chip("chip-lid","st-lid",lidOpen,"open","closed");
+  chip("chip-proj","st-proj",settings.projector_on===undefined?null:settings.projector_on,"on","off");
   const note=$("lid-note");
   note.hidden=false;
-  note.textContent=settings.lid_available
-    ? "Applies to the unit shown in the panel. Switch units from the name at the top."
-    : "Lid tracking is only available on macOS.";
+  note.textContent=!settings.lid_available
+    ? "Lid tracking is only available on macOS."
+    : !settings.projector_host
+      ? "No projector configured, so the lid decides on its own. Add its address to config.json to include it."
+      : "Applies to the unit shown in the panel. Projector read by "+
+        settings.projector_method+" at "+settings.projector_host+".";
 }
 async function loadSettings(){
   try{ settings=await api("/settings"); }catch(e){}
