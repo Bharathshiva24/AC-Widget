@@ -2,23 +2,18 @@
 
 A macOS menubar panel for controlling smart air conditioners.
 
-Click the menubar item and the panel opens into a small 3D model of the room,
-with the air conditioner on the wall and the controls floating beside it. The
-theme follows the time of day, and fan speed and swing are rotary knobs you can
-turn with the mouse or a remote.
+Click the menubar item and a compact panel drops down with everything on one
+screen: a temperature dial, the running mode, fan speed, swing and presets. It
+follows the system light or dark setting and is built to feel like a part of
+macOS rather than a web page in a window.
 
 Air conditioners are reached through a driver layer, so support for a new
 manufacturer is one file and one line of registration — the interface adapts on
 its own to whatever that unit can do.
 
-| Morning | Evening | Night |
+| Light | Dark | Switched off |
 |---|---|---|
-| ![The panel in the morning theme](docs/theme-morning.png) | ![The panel in the evening theme](docs/theme-evening.png) | ![The panel in the night theme](docs/theme-night.png) |
-
-With the air conditioner off, the room stays on screen and simply goes quiet:
-the airflow, the glow and the unit's own display fade out, and the vent closes.
-
-![The room with the air conditioner switched off](docs/room-off.png)
+| ![The panel in light appearance](docs/panel-light.png) | ![The panel in dark appearance](docs/panel-dark.png) | ![The panel with the unit switched off](docs/panel-off.png) |
 
 ---
 
@@ -43,39 +38,37 @@ the airflow, the glow and the unit's own display fade out, and the vent closes.
 ## Overview
 
 Most air conditioners ship with a phone app and a remote. This project puts the
-same controls one click away in the macOS menubar, and presents them as a room
-you look into rather than a list of settings.
+same controls one click away in the macOS menubar, in a panel that reads as a
+native one rather than a list of settings.
 
 The panel is a small local web page rendered in a native menubar popover. A
 Python process holds the connection to the air conditioner and serves that page
-over a loopback socket. The 3D room is CSS transforms — there is no WebGL, no
-bundler and no front-end framework.
+over a loopback socket. Everything on screen is plain CSS and inline SVG —
+there is no bundler and no front-end framework.
 
 ## Features
 
-**The room**
-- Air conditioner off: the whole home from above, one tile per room.
-- Air conditioner on: the view zooms into that room, seen from inside, with the
-  unit on the wall showing its set temperature and animated airflow.
-- Multiple units are supported, one per room, switched from a menu or by
-  tapping a room in the overview.
+**The panel**
+- A 320pt popover that sizes itself to its contents: a 270° temperature dial,
+  mode buttons, fan speed and swing selectors, and preset toggles.
+- Switched off, the dial goes quiet and the controls dim in place rather than
+  disappearing, so the panel never jumps around.
+- Multiple units are supported, switched from the name dropdown in the header.
 
-**Time-of-day themes**
-- Morning (06:00–16:59): bright, clean white.
-- Evening (17:00–19:59): warm amber and orange.
-- Night (20:00–05:59): deep black with soft lighting.
-- The theme changes on its own and cross-fades over about a second. Room
-  surfaces, furniture, window, glass panel and accent colour all move together.
+**Appearance**
+- Follows the macOS light or dark setting, using the system accent blue.
+- Colours, spacing and radii are tokens declared once at the top of the page,
+  so restyling is a handful of values rather than a sweep through the CSS.
 
 **Controls**
 - Temperature dial with drag, `−`/`+` buttons and arrow keys.
-- Mode buttons, rotary fan-speed and swing knobs, and preset toggles.
+- Mode buttons, segmented fan-speed and swing selectors, and preset toggles.
 - Only the controls the selected unit reports are drawn; the window resizes to
   fit what is left.
 
 **Remote navigation**
-- Arrow keys move between controls, `Enter` picks a knob up, arrows then turn
-  it, `Enter` or `Esc` puts it down. `Esc` on the panel turns the unit off.
+- Arrow keys move between controls and `Enter` activates the focused one.
+  `Esc` closes the device menu, or switches the unit off.
 
 **Optional network access**
 - A token-guarded endpoint on the local network, for driving the same controls
@@ -160,8 +153,8 @@ then `.env`, then the Keychain.
 | Turn on or off | The power button, or `Esc` to switch off |
 | Set temperature | Drag the dial, use `−` / `+`, or arrow keys |
 | Change mode | Click a mode button |
-| Fan speed / swing | Click a segment or drag around the knob |
-| Switch room | The name dropdown, or tap a room in the overview |
+| Fan speed / swing | Click an option in the selector |
+| Switch unit | The name dropdown in the header |
 | Quit | **Quit** at the bottom of the panel |
 
 Run without any hardware:
@@ -169,9 +162,6 @@ Run without any hardware:
 ```bash
 python ac_panel.py --demo
 ```
-
-Preview a theme without waiting for the clock — append `?tod=morning`,
-`?tod=evening` or `?tod=night` to the panel's address in a browser.
 
 ## Supported brands
 
@@ -188,8 +178,8 @@ work with Panasonic units that use the global Comfort Cloud app.
 
 Each brand is one file under `acbrands/` that declares what the unit can do and
 implements two methods. The panel reads that declaration and draws only those
-controls, so a unit without swing simply never gets that knob — no interface
-code changes.
+controls, so a unit without swing simply never gets that selector — no
+interface code changes.
 
 1. Copy `acbrands/template.py` to `acbrands/yourbrand.py`.
 2. Fill in `CAPS` (modes, fan speeds, swing levels, presets, temperature range)
@@ -221,9 +211,8 @@ install.sh             re-install the app without touching credentials
   and the panel itself are portable, but the shell around them is not.
 - **Unofficial integrations.** Cloud drivers talk to manufacturer services that
   have no published API. A vendor change can break them without notice.
-- **Two rooms.** The 3D view models a bedroom and a hall. More units than that
-  are read but not drawn.
-- **Generic rooms.** The furniture is illustrative, not your actual floor plan.
+- **Two rooms.** Units are mapped to a bedroom and a hall. More than two are
+  read and controllable, but only the first two are named.
 - **MirAIe capability set.** Heat mode, the self-clean preset and the display
   toggle exist in the underlying library but are left out, because the units
   this was tested against ignore them. They are one line each to enable in
