@@ -55,6 +55,17 @@ there is no bundler and no front-end framework.
   disappearing, so the panel never jumps around.
 - Multiple units are supported, switched from the name dropdown in the header.
 
+**Follow the MacBook lid**
+- Optional: opening the lid switches the air conditioner on, closing it
+  switches it off.
+- Off by default, turned on from the settings panel behind the gear icon.
+- Acts on the unit currently shown in the panel, so changing units moves the
+  automation with it.
+- Driven by two signals, because neither alone is enough: the system sleep and
+  wake notifications, and the clamshell flag macOS uses itself. The second
+  catches a lid closed in clamshell mode, where the Mac stays awake on an
+  external display and never posts a sleep notification.
+
 **Appearance**
 - Follows the macOS light or dark setting, using the system accent blue.
 - Colours, spacing and radii are tokens declared once at the top of the page,
@@ -140,7 +151,7 @@ then `.env`, then the Keychain.
 
 | File | Purpose | Tracked |
 |---|---|---|
-| `config.json` | Which brand this machine uses | No — local state |
+| `config.json` | Which brand this machine uses, and your settings | No — local state |
 | `.env` | Local secrets and overrides | No — ignored |
 | `lan_token` | Generated token for network access | No — ignored |
 | `ac_panel.log` | Runtime log | No — ignored |
@@ -155,6 +166,8 @@ then `.env`, then the Keychain.
 | Change mode | Click a mode button |
 | Fan speed / swing | Click an option in the selector |
 | Switch unit | The name dropdown in the header |
+| Settings | The gear icon, left of the power button |
+| Follow the lid | Settings → **Follow MacBook lid** |
 | Quit | **Quit** at the bottom of the panel |
 
 Run without any hardware:
@@ -217,7 +230,12 @@ install.sh             re-install the app without touching credentials
   toggle exist in the underlying library but are left out, because the units
   this was tested against ignore them. They are one line each to enable in
   `acbrands/miraie.py`.
-- **No scheduling or automation.** This is a controller, not a thermostat.
+- **Lid automation needs the app running.** It is the panel that reacts to the
+  lid, so nothing is sent if it is not running when the lid moves. Closing the
+  lid on battery sleeps the Mac within moments: the off command goes out from
+  the sleep notification, which normally wins that race but cannot be
+  guaranteed on a slow or dropped connection.
+- **No scheduling.** Beyond the lid, this is a controller, not a thermostat.
 
 ## Security considerations
 

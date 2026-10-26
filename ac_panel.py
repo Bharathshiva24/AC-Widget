@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -23,9 +24,16 @@ import acbrands
 WIDTH, HEIGHT = 320, 520
 TOKEN = secrets.token_urlsafe(24)
 STATE = {"driver": None, "devices": [], "error": None, "quit": False,
-         "height": HEIGHT, "selected": None}
+         "height": HEIGHT, "selected": None, "loop": None}
 ROOMS = ("bedroom", "hall")
 ROOM_WORDS = {"bedroom": ("bed", "master"), "hall": ("hall", "living", "drawing", "lounge")}
+
+# Settings the person can change from the panel, persisted in config.json.
+SETTINGS = {"lid_control": False}
+# What the lid was doing last time we looked. None means "not established yet",
+# which is deliberately not actionable: starting the app with the lid open must
+# not read as the lid having just been opened.
+LID = {"closed": None}
 
 
 # ---------------------------------------------------------------- AC state
@@ -91,6 +99,113 @@ def log(message):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), message, flush=True)
 
 
+# ------------------------------------------------------- settings and lid
+
+def chosen_device():
+    """The unit the panel is showing, which is the one automation acts on."""
+    if not STATE["devices"]:
+        return None
+    for device in STATE["devices"]:
+        if device.id == STATE["selected"]:
+            return device
+    return STATE["devices"][0]
+
+
+def load_settings():
+    SETTINGS["lid_control"] = bool(acbrands.read_config().get("lid_control", False))
+
+
+def save_settings(**values):
+    SETTINGS.update({k: bool(v) for k, v in values.items()})
+    acbrands.write_config(**{k: bool(v) for k, v in values.items()})
+    # Re-establish the baseline so re-enabling never fires on a stale reading.
+    LID["closed"] = None
+
+
+def parse_clamshell(text):
+    """Pull AppleClamshellState out of ioreg output. True means the lid is shut."""
+    for line in text.splitlines():
+        if "AppleClamshellState" in line:
+            return line.split("=")[-1].strip().strip('"') == "Yes"
+    return None
+
+
+def clamshell_closed():
+    """Ask macOS whether the lid is shut, or None when that can't be read.
+
+    This is the same flag macOS uses itself, so it reports a closed lid even in
+    clamshell mode, where the Mac stays awake on an external display and no
+    sleep notification is ever posted.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        done = subprocess.run(["/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4"],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_clamshell(done.stdout) if done.returncode == 0 else None
+
+
+async def apply_lid(closed, source):
+    """Mirror the lid into the selected unit: open turns it on, shut turns it off."""
+    if not SETTINGS["lid_control"]:
+        return
+    device = chosen_device()
+    if device is None or STATE["driver"] is None:
+        return
+    want = not closed
+    try:
+        if bool(device.snapshot().get("power")) == want:
+            return
+        await STATE["driver"].command(device, "power", want)
+    except Exception as exc:                 # never let automation take the app down
+        log("Lid %s (%s): could not switch %s: %s"
+            % ("closed" if closed else "opened", source, device.name, exc))
+        return
+    log("Lid %s (%s): %s switched %s"
+        % ("closed" if closed else "opened", source, device.name, "on" if want else "off"))
+
+
+async def watch_lid():
+    """Poll the clamshell flag and act on changes.
+
+    Polling covers the case sleep notifications miss: a lid closed while the Mac
+    stays awake on an external display.
+    """
+    while True:
+        await asyncio.sleep(3)
+        if not SETTINGS["lid_control"]:
+            continue
+        closed = await asyncio.get_event_loop().run_in_executor(None, clamshell_closed)
+        if closed is None:
+            continue
+        if LID["closed"] is None:            # first reading only establishes a baseline
+            LID["closed"] = closed
+            continue
+        if closed != LID["closed"]:
+            LID["closed"] = closed
+            await apply_lid(closed, "lid")
+
+
+def lid_event(closed, source):
+    """Called from the AppKit thread when macOS is about to sleep or has woken.
+
+    Closing the lid usually sleeps the Mac before the poll above can run, so the
+    sleep notification is what actually catches it. We block briefly on the way
+    down to give the command time to leave the machine.
+    """
+    loop = STATE["loop"]
+    if loop is None or not SETTINGS["lid_control"]:
+        return
+    LID["closed"] = closed
+    try:
+        future = asyncio.run_coroutine_threadsafe(apply_lid(closed, source), loop)
+        future.result(timeout=4 if closed else 1.5)
+    except Exception:
+        pass
+
+
 async def connect(brand_id):
     """Keep trying to reach the configured brand until the ACs answer."""
     while not STATE["devices"]:
@@ -154,7 +269,7 @@ def build_app(port):
 
     async def ui(request):
         body = await request.json()
-        STATE["height"] = max(300, min(760, int(body.get("height", HEIGHT))))
+        STATE["height"] = max(200, min(760, int(body.get("height", HEIGHT))))
         STATE["selected"] = body.get("selected")
         return web.json_response({"ok": True})
 
@@ -162,12 +277,33 @@ def build_app(port):
         STATE["quit"] = True
         return web.json_response({"ok": True})
 
+    def settings_payload():
+        device = chosen_device()
+        room = None
+        if device is not None:
+            room = next((name for name, unit in assign_rooms(STATE["devices"]).items()
+                         if unit is device), None)
+        return {"lid_control": SETTINGS["lid_control"],
+                "lid_available": sys.platform == "darwin",
+                "target": device.name if device is not None else None,
+                "target_room": room}
+
+    async def settings(request):
+        if request.method == "POST":
+            body = await request.json()
+            if "lid_control" in body:
+                save_settings(lid_control=body["lid_control"])
+                log("Lid control %s" % ("enabled" if SETTINGS["lid_control"] else "disabled"))
+        return web.json_response(settings_payload())
+
     app = web.Application(middlewares=[guard])
     app.add_routes([
         web.get("/", index),
         web.get("/state", state),
         web.post("/cmd", cmd),
         web.post("/ui", ui),
+        web.get("/settings", settings),
+        web.post("/settings", settings),
         web.post("/quit", quit_app),
     ])
     return app
@@ -225,7 +361,7 @@ async def start_server(sock, port):
 
 def run_menubar(url):
     from AppKit import (NSApplication, NSPopover, NSStatusBar,
-                        NSVariableStatusItemLength, NSViewController)
+                        NSVariableStatusItemLength, NSViewController, NSWorkspace)
     from Foundation import NSMakeRect, NSObject, NSTimer, NSURL, NSURLRequest
     from PyObjCTools import AppHelper
     from WebKit import WKWebView, WKWebViewConfiguration
@@ -259,6 +395,20 @@ def run_menubar(url):
                 0.2, self, "tick:", None, True)
             self.last_height = HEIGHT
             self.last_title = None
+
+            # Closing the lid sleeps the Mac before any poll could notice, so
+            # the sleep notification is what catches it in practice.
+            centre = NSWorkspace.sharedWorkspace().notificationCenter()
+            centre.addObserver_selector_name_object_(
+                self, "macSleeping:", "NSWorkspaceWillSleepNotification", None)
+            centre.addObserver_selector_name_object_(
+                self, "macWaking:", "NSWorkspaceDidWakeNotification", None)
+
+        def macSleeping_(self, note):
+            lid_event(True, "sleep")
+
+        def macWaking_(self, note):
+            lid_event(False, "wake")
 
         def toggle_(self, sender):
             if self.popover.isShown():
@@ -320,7 +470,9 @@ def main():
     port = sock.getsockname()[1]
     url = "http://127.0.0.1:%d/" % port
 
+    load_settings()
     loop = asyncio.new_event_loop()
+    STATE["loop"] = loop
     threading.Thread(target=loop.run_forever, daemon=True).start()
     asyncio.run_coroutine_threadsafe(start_server(sock, port), loop).result(10)
     lan_port, lan_token = os.environ.get("AC_LAN_PORT"), os.environ.get("AC_LAN_TOKEN")
@@ -331,10 +483,12 @@ def main():
             log("TV access could not start: %s" % exc)
 
     asyncio.run_coroutine_threadsafe(connect(brand), loop)
+    asyncio.run_coroutine_threadsafe(watch_lid(), loop)
     if brand == "demo":
         print("Demo panel at " + url)
 
-    log("AC started (%s)" % brand)
+    log("AC started (%s, lid control %s)"
+        % (brand, "on" if SETTINGS["lid_control"] else "off"))
     if brand == "demo" and "--browser" in sys.argv:
         threading.Event().wait()
     else:
@@ -399,6 +553,13 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
 .title.solo{pointer-events:none}
 .title.solo svg{display:none}
 .sub{font-size:11px;color:var(--label2);margin-top:2px;letter-spacing:.05px}
+
+.actions{display:flex;align-items:center;gap:7px;flex:none}
+.gear{width:28px;height:28px;flex:none;border-radius:50%;background:var(--control);color:var(--label2);
+  display:grid;place-items:center;transition:background .18s,color .18s,transform .1s}
+.gear svg{width:15px;height:15px}
+.gear:hover{background:var(--control-h);color:var(--label)}
+.gear:active{transform:scale(.93)}
 
 .power{width:28px;height:28px;flex:none;border-radius:50%;background:var(--control);color:var(--label2);
   display:grid;place-items:center;transition:background .22s,color .22s,box-shadow .35s,transform .1s}
@@ -494,8 +655,23 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
 .sw{position:relative;flex:none;width:28px;height:17px;border-radius:9px;background:var(--track);transition:background .22s}
 .sw i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--knob);
   box-shadow:0 1px 2.5px rgba(0,0,0,.2);transition:transform .24s var(--ease)}
-.tile[aria-pressed=true] .sw{background:var(--accent)}
-.tile[aria-pressed=true] .sw i{transform:translateX(11px)}
+.tile[aria-pressed=true] .sw,.srow[aria-pressed=true] .sw{background:var(--accent)}
+.tile[aria-pressed=true] .sw i,.srow[aria-pressed=true] .sw i{transform:translateX(11px)}
+
+/* ------------------------------------------------------------- settings */
+.sheet{display:flex;flex-direction:column;gap:12px}
+.sheethead{display:flex;align-items:center;gap:9px}
+.sheethead b{font-size:15px;font-weight:590;letter-spacing:-.1px}
+.srow{display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:10px;
+  background:var(--control);text-align:left;transition:background .18s}
+.srow:hover{background:var(--control-h)}
+.srow:active{background:var(--control-p)}
+.srow div{flex:1;min-width:0}
+.srow b{display:block;font-size:12.5px;font-weight:590;letter-spacing:-.05px}
+.srow small{display:block;font-size:10.5px;color:var(--label2);margin-top:3px;line-height:1.42}
+.srow[disabled]{opacity:.45;pointer-events:none}
+.snote{font-size:10.5px;color:var(--label3);line-height:1.45;padding:0 3px}
+.panel.settings > :not(#sheet):not(#veil):not(.quit){display:none}
 
 .quit{align-self:center;font-size:11px;color:var(--label3);padding:3px 10px;border-radius:6px;transition:color .15s,background .15s}
 .quit:hover{color:var(--label2);background:var(--control)}
@@ -531,9 +707,14 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
     </button>
     <div class="sub" id="sub">Connecting</div>
   </div>
-  <button class="power" id="power" aria-label="Power" aria-pressed="false">
-    <svg viewBox="0 0 24 24"><path d="M12 4v8M7.200 7.200a7 7 0 1 0 9.600 0"/></svg>
-  </button>
+  <div class="actions">
+    <button class="gear" id="settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <button class="power" id="power" aria-label="Power" aria-pressed="false">
+      <svg viewBox="0 0 24 24"><path d="M12 4v8M7.200 7.200a7 7 0 1 0 9.600 0"/></svg>
+    </button>
+  </div>
 </div>
 <div class="menu" id="menu" role="menu"></div>
 
@@ -565,6 +746,21 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
   <div class="hsel" id="sel-swing" role="group" aria-label="Swing"></div>
 </div>
 <div class="pills" id="pills"></div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheethead">
+    <button class="gear" id="sheet-back" aria-label="Back">
+      <svg viewBox="0 0 24 24"><path d="m14 5.500-6 6.500 6 6.500"/></svg>
+    </button>
+    <b>Settings</b>
+  </div>
+  <button class="srow" id="opt-lid" aria-pressed="false">
+    <div><b>Follow MacBook lid</b><small id="lid-copy">Switches the air conditioner on when you open the lid and off when you close it.</small></div>
+    <span class="sw"><i></i></span>
+  </button>
+  <p class="snote" id="lid-note" hidden></p>
+</div>
+
 <button class="quit" id="quit">Quit</button>
 
 <div class="veil show" id="veil"><div class="spin" id="spin"></div><b id="veil-t">Connecting to your AC</b><p id="veil-p"></p></div>
@@ -739,7 +935,7 @@ const whole=t=>t==null?null:Math.min(TMAX,Math.max(TMIN,Math.round(t)));
 
 /* The popover resizes to whatever the panel currently needs. */
 function fit(){
-  const h=Math.max(300,Math.min(760,Math.ceil($("panel").offsetHeight)));
+  const h=Math.max(200,Math.min(760,Math.ceil($("panel").offsetHeight)));
   const key=h+"|"+sel;
   if(key!==lastUi){lastUi=key; api("/ui",{height:h,selected:sel}).catch(()=>{lastUi="";});}
 }
@@ -814,6 +1010,41 @@ $("title").onclick=e=>{
 $("quit").onclick=()=>api("/quit",{});
 document.addEventListener("pointerdown",e=>{ if(!e.target.closest(".menu,.title")) closeMenu(); });
 
+/* ---- settings sheet ---- */
+let settings={lid_control:false,lid_available:true,target:null};
+function paintSettings(){
+  const row=$("opt-lid");
+  row.setAttribute("aria-pressed",!!settings.lid_control);
+  row.disabled=!settings.lid_available;
+  const who=ROOM_LABEL[settings.target_room]||settings.target||"the air conditioner";
+  $("lid-copy").textContent="Switches "+who+" on when you open the lid and off when you close it.";
+  const note=$("lid-note");
+  note.hidden=false;
+  note.textContent=settings.lid_available
+    ? "Applies to the unit shown in the panel. Switch units from the name at the top."
+    : "Lid tracking is only available on macOS.";
+}
+async function loadSettings(){
+  try{ settings=await api("/settings"); }catch(e){}
+  paintSettings();
+}
+function openSheet(on){
+  $("sheet").hidden=!on;
+  $("panel").classList.toggle("settings",on);
+  closeMenu();
+  fit();
+}
+const sheetOpen=()=>!$("sheet").hidden;
+$("settings").onclick=()=>{ openSheet(true); loadSettings(); };
+$("sheet-back").onclick=()=>openSheet(false);
+$("opt-lid").onclick=async()=>{
+  const next=!settings.lid_control;
+  settings.lid_control=next; paintSettings();
+  try{ settings=await api("/settings",{lid_control:next}); }
+  catch(e){ settings.lid_control=!next; }
+  paintSettings();
+};
+
 const dial=$("dial");
 function polar(e){
   const r=dial.getBoundingClientRect(), k=r.width/200, dx=e.clientX-(r.left+100*k), dy=e.clientY-(r.top+92*k);
@@ -873,6 +1104,7 @@ document.addEventListener("keydown",e=>{
     if(el&&el.tagName==="BUTTON"){ el.click(); e.preventDefault(); }
   }else if(e.key==="Escape"){
     if($("menu").classList.contains("show")){ closeMenu(); e.preventDefault(); return; }
+    if(sheetOpen()){ openSheet(false); e.preventDefault(); return; }
     const d=cur(); if(d&&d.power){ send("power",false,{power:false}); e.preventDefault(); }
   }
 });
