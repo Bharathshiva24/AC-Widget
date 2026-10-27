@@ -7,6 +7,8 @@ only maps it onto the panel's generic actions.
 Not compatible with Panasonic units that use the global Comfort Cloud app.
 """
 
+from datetime import datetime, timedelta
+
 from .base import ACDriver, AuthError, Capabilities, Device, Field
 
 # What the panel offers for these units. Fan speeds run gentlest to strongest
@@ -27,7 +29,11 @@ TOGGLES = []
 
 CAPS = Capabilities(modes=MODES, fan=FAN, swing=SWING, presets=PRESETS,
                     toggles=TOGGLES, temp={"min": 16, "max": 30, "step": 1},
-                    room_temp=True)
+                    room_temp=True, energy=True)
+
+# The consumption endpoint takes at most six months of daily readings per
+# request. The panel asks for a month, so one request is always enough.
+ENERGY_MAX_DAYS = 180
 
 
 def login_id(value):
@@ -115,6 +121,33 @@ class MirAIeDriver(ACDriver):
             await raw.set_display_mode(DisplayMode.ON if value else DisplayMode.OFF)
         else:
             raise ValueError("Panasonic MirAIe has no '%s' control" % action)
+
+    async def energy_daily(self, device, start, end):
+        """Daily kWh from MirAIe's own consumption endpoint.
+
+        This is a plain HTTP request, not the MQTT stream the rest of the
+        driver uses, so it is deliberately called on a slow timer rather than
+        with every refresh. The service answers with a `message` instead of
+        readings when it has nothing for the range, which reads as no data.
+        """
+        from miraie_ac import ConsumptionPeriodType
+
+        if self.hub is None:
+            return {}
+        if (end - start).days > ENERGY_MAX_DAYS:
+            start = end - timedelta(days=ENERGY_MAX_DAYS)
+        answer = await self.hub.get_energy_consumption(
+            device.raw, ConsumptionPeriodType.DAILY,
+            start.strftime("%d%m%Y"), end.strftime("%d%m%Y"))
+        if not isinstance(answer, dict) or "message" in answer:
+            return {}
+        readings = {}
+        for key, value in answer.items():
+            try:
+                readings[datetime.strptime(str(key), "%d%m%Y").date()] = float(value)
+            except (TypeError, ValueError):
+                continue        # a key or figure in a shape we don't know
+        return readings
 
     async def close(self):
         hub, self.hub = self.hub, None

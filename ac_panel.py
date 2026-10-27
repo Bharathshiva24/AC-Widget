@@ -8,6 +8,7 @@ Brands live in the acbrands package, one module each; the panel renders only
 the controls the selected brand reports that it supports.
 """
 import asyncio
+import datetime
 import json
 import os
 import secrets
@@ -34,6 +35,12 @@ SETTINGS = {"lid_control": False}
 # yet", which is deliberately not actionable: starting the app with the lid
 # open must not read as the lid having just been opened.
 LID = {"closed": None}
+# Electricity readings, per unit id. These come from a separate request to the
+# manufacturer rather than the live connection, and the figures move by the
+# hour at most, so they are fetched on a slow timer and served from here.
+ENERGY = {}
+ENERGY_EVERY = 900          # seconds between refreshes of one unit
+ENERGY_DAYS = 30            # how much history the chart shows
 
 
 # ---------------------------------------------------------------- AC state
@@ -176,6 +183,54 @@ async def apply_state(want, source):
     log("Automation (%s): %s switched %s" % (source, device.name, "on" if want else "off"))
 
 
+async def fetch_energy(device, force=False):
+    """Pull this unit's daily readings into the cache, at most so often.
+
+    Failures keep whatever was read last rather than blanking the panel: a
+    stale figure is more use than an empty one, and the service being briefly
+    unreachable is not news.
+    """
+    entry = ENERGY.setdefault(device.id, {"daily": {}, "fetched": 0,
+                                          "error": None, "busy": False})
+    driver = STATE["driver"]
+    if entry["busy"] or driver is None or not device.caps.energy:
+        return entry
+    if not force and time.time() - entry["fetched"] < ENERGY_EVERY:
+        return entry
+    today = datetime.date.today()
+    # Far enough back for both the chart and the month running total.
+    start = min(today.replace(day=1), today - datetime.timedelta(days=ENERGY_DAYS - 1))
+    entry["busy"] = True
+    try:
+        readings = await driver.energy_daily(device, start, today)
+    except NotImplementedError:
+        entry["error"] = None
+    except Exception as exc:
+        entry["error"] = str(exc)[:120]
+        log("Energy: could not read %s: %s" % (device.name, exc))
+    else:
+        entry["daily"] = {day.isoformat(): round(float(value), 2)
+                          for day, value in readings.items()}
+        entry["error"] = None
+    finally:
+        entry["busy"] = False
+        entry["fetched"] = time.time()
+    return entry
+
+
+async def watch_energy():
+    """Keep every unit's readings reasonably fresh in the background.
+
+    Separate from the live connection on purpose: this is an HTTP request to
+    the manufacturer, and nothing in the panel should ever wait on it.
+    """
+    while True:
+        for device in list(STATE["devices"]):
+            if device.caps.energy:
+                await fetch_energy(device)
+        await asyncio.sleep(60)
+
+
 async def watch_inputs():
     """Act when the lid changes.
 
@@ -304,6 +359,39 @@ def build_app(port):
                 "target_room": room,
                 "lid_closed": LID["closed"]}
 
+    def energy_payload():
+        device = chosen_device()
+        if device is None or not device.caps.energy:
+            return {"available": False}
+        entry = ENERGY.get(device.id) or {}
+        daily = entry.get("daily") or {}
+        today = datetime.date.today()
+        # A fixed-length series ending today, with None where the service had
+        # nothing. The chart draws those as gaps rather than as zero, which
+        # would read as "used no electricity".
+        days = []
+        for back in range(ENERGY_DAYS - 1, -1, -1):
+            key = (today - datetime.timedelta(days=back)).isoformat()
+            days.append([key, daily.get(key)])
+        month = [value for key, value in daily.items()
+                 if key[:7] == today.isoformat()[:7]]
+        return {"available": True,
+                "unit": device.name,
+                "today": daily.get(today.isoformat()),
+                "month": round(sum(month), 2) if month else None,
+                "month_days": len(month),
+                "days": days,
+                "fetched": entry.get("fetched") or None,
+                "error": entry.get("error")}
+
+    async def energy(request):
+        device = chosen_device()
+        if device is not None and device.caps.energy:
+            # Kick a refresh and answer from the cache: opening the panel must
+            # never wait on the manufacturer's server.
+            asyncio.ensure_future(fetch_energy(device))
+        return web.json_response(energy_payload())
+
     async def settings(request):
         if request.method == "POST":
             body = await request.json()
@@ -320,6 +408,7 @@ def build_app(port):
         web.post("/ui", ui),
         web.get("/settings", settings),
         web.post("/settings", settings),
+        web.get("/energy", energy),
         web.post("/quit", quit_app),
     ])
     return app
@@ -500,6 +589,7 @@ def main():
 
     asyncio.run_coroutine_threadsafe(connect(brand), loop)
     asyncio.run_coroutine_threadsafe(watch_inputs(), loop)
+    asyncio.run_coroutine_threadsafe(watch_energy(), loop)
     if brand == "demo":
         print("Demo panel at " + url)
 
@@ -693,6 +783,16 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
 .status i{width:7px;height:7px;border-radius:50%;background:var(--label3);flex:none;transition:background .3s}
 .status span.on i{background:#34C759}
 .snote{font-size:10.5px;color:var(--label3);line-height:1.45;padding:0 3px}
+.esec{display:flex;flex-direction:column;gap:9px;margin-top:3px}
+.ehead{display:flex;align-items:baseline;gap:6px;padding:0 3px}
+.ehead b{font-size:12.5px;font-weight:590;letter-spacing:-.05px}
+.ehead span{font-size:10.5px;color:var(--label3);margin-left:auto}
+.bars{display:flex;align-items:flex-end;gap:2px;height:52px;padding:8px 10px;
+  border-radius:9px;background:var(--well)}
+.bars i{flex:1;min-width:0;border-radius:2px;background:var(--accent);
+  transition:height .32s var(--ease)}
+.bars i.gap{background:var(--label3);opacity:.5}
+.bars i.today{opacity:.5}
 .panel.settings > :not(#sheet):not(#veil):not(.quit){display:none}
 
 .quit{align-self:center;font-size:11px;color:var(--label3);padding:3px 10px;border-radius:6px;transition:color .15s,background .15s}
@@ -784,6 +884,16 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
     <span id="chip-lid"><i></i>Lid<b id="st-lid">—</b></span>
   </div>
   <p class="snote" id="lid-note" hidden></p>
+
+  <div class="esec" id="energy" hidden>
+    <div class="ehead"><b>Electricity</b><span id="e-unit"></span></div>
+    <div class="status">
+      <span>Today<b id="e-today">—</b></span>
+      <span>This month<b id="e-month">—</b></span>
+    </div>
+    <div class="bars" id="e-bars"></div>
+    <p class="snote" id="e-note"></p>
+  </div>
 </div>
 
 <button class="quit" id="quit">Quit</button>
@@ -821,7 +931,7 @@ async function api(path,body){
 async function refresh(){
   if(Date.now()<hold||dragging) return;
   try{ const n=await api("/state"); if(Date.now()<hold||dragging) return; s=n; render(); }catch(e){}
-  if(typeof sheetOpen==="function"&&sheetOpen()) loadSettings();
+  if(typeof sheetOpen==="function"&&sheetOpen()){ loadSettings(); loadEnergy(); }
 }
 window.refresh=refresh;
 const cur=()=>s&&s.connected?(s.devices.find(d=>d.id===sel)||s.devices[0]):null;
@@ -1061,6 +1171,38 @@ async function loadSettings(){
   try{ settings=await api("/settings"); }catch(e){}
   paintSettings();
 }
+
+/* --- electricity: daily kWh, which is what a bill calls a unit ----------- */
+let energy={available:false};
+const units=v=>v==null?"—":(v<10?v.toFixed(1):Math.round(v))+" units";
+function paintEnergy(){
+  const box=$("energy");
+  box.hidden=!energy.available;
+  if(!energy.available) return;
+  $("e-unit").textContent=ROOM_LABEL[settings.target_room]||energy.unit||"";
+  $("e-today").textContent=units(energy.today);
+  $("e-month").textContent=units(energy.month);
+  const days=energy.days||[];
+  const peak=Math.max(0.1,...days.map(d=>d[1]||0));
+  $("e-bars").innerHTML=days.map(([day,value],i)=>{
+    // A missing day is a stub, not a zero bar: the service simply had nothing.
+    const when=new Date(day+"T00:00:00").toLocaleDateString(undefined,{day:"numeric",month:"short"});
+    const kind=value==null?"gap":(i===days.length-1?"today":"");
+    const height=value==null?8:Math.max(9,Math.round(value/peak*100));
+    return '<i class="'+kind+'" style="height:'+height+'%" title="'+when+" — "+
+      (value==null?"no reading":units(value))+'"></i>';
+  }).join("");
+  $("e-note").textContent=energy.error
+    ? "Couldn't reach the service just now — showing the last figures read."
+    : energy.today==null
+      ? "Today's figure usually appears a few hours in. One unit is one kWh."
+      : "One unit is one kWh, the same unit your bill counts. Today's figure is "+
+        "partial and grows through the day.";
+}
+async function loadEnergy(){
+  try{ energy=await api("/energy"); }catch(e){ return; }
+  paintEnergy(); fit();
+}
 function openSheet(on){
   $("sheet").hidden=!on;
   $("panel").classList.toggle("settings",on);
@@ -1068,7 +1210,7 @@ function openSheet(on){
   fit();
 }
 const sheetOpen=()=>!$("sheet").hidden;
-$("settings").onclick=()=>{ openSheet(true); loadSettings(); };
+$("settings").onclick=()=>{ openSheet(true); loadSettings(); loadEnergy(); };
 $("sheet-back").onclick=()=>openSheet(false);
 $("opt-lid").onclick=async()=>{
   const next=!settings.lid_control;

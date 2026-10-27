@@ -44,7 +44,7 @@ class Capabilities:
     """
 
     def __init__(self, modes=(), fan=(), swing=(), presets=(), toggles=(),
-                 temp=None, room_temp=True):
+                 temp=None, room_temp=True, energy=False):
         self.modes = [tuple(x) for x in modes]
         self.fan = [tuple(x) for x in fan]
         self.swing = [tuple(x) for x in swing]
@@ -52,6 +52,10 @@ class Capabilities:
         self.toggles = [tuple(x) for x in toggles]
         self.temp = dict(temp or DEFAULT_TEMP)
         self.room_temp = bool(room_temp)
+        # Whether this unit can report how much electricity it has used. The
+        # reading is fetched by the driver, not carried in a snapshot, because
+        # it comes from a separate request and changes by the hour at most.
+        self.energy = bool(energy)
 
     def supports(self, action, value=None):
         """True when this unit accepts `action` (and `value`, when given)."""
@@ -78,7 +82,8 @@ class Capabilities:
                 "swing": [list(x) for x in self.swing],
                 "presets": [list(x) for x in self.presets],
                 "toggles": [list(x) for x in self.toggles],
-                "temp": self.temp, "room_temp": self.room_temp}
+                "temp": self.temp, "room_temp": self.room_temp,
+                "energy": self.energy}
 
 
 class Device:
@@ -129,6 +134,18 @@ class ACDriver:
     async def command(self, device, action, value):
         """Apply one change. `action` is power, temp, mode, fan, swing, preset,
         or the name of one of this unit's toggles."""
+        raise NotImplementedError
+
+    async def energy_daily(self, device, start, end):
+        """How much electricity this unit used each day, in kWh.
+
+        `start` and `end` are dates, inclusive. Returns {date: kWh} holding
+        only the days the service actually reports — a gap means no reading,
+        not a zero, and the panel draws it as such. Today's figure is normally
+        partial and grows through the day.
+
+        Only called when the unit's Capabilities declare `energy`.
+        """
         raise NotImplementedError
 
     async def close(self):

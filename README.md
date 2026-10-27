@@ -55,6 +55,19 @@ there is no bundler and no front-end framework.
   disappearing, so the panel never jumps around.
 - Multiple units are supported, switched from the name dropdown in the header.
 
+**Electricity**
+- Settings shows how much the unit on screen has used: today, this calendar
+  month, and a thirty-day bar chart.
+- Figures are in units — one unit is one kWh, the same unit an electricity bill
+  counts.
+- Read from the manufacturer's own consumption records, so there is nothing to
+  install and no meter to wire up. Brands whose drivers cannot report it simply
+  never draw the section.
+- Fetched on a slow timer in the background. Nothing in the panel ever waits on
+  it, and a service that cannot be reached leaves the last figures on screen
+  rather than blanking them.
+- Days the service has no reading for are drawn as gaps, not as zero.
+
 **Automatic control**
 - Optional: the air conditioner switches on when the MacBook lid opens and off
   when it closes.
@@ -203,6 +216,10 @@ interface code changes.
 2. Fill in `CAPS` (modes, fan speeds, swing levels, presets, temperature range)
    and implement `connect()`, `command()` and `Device.snapshot()`.
 3. Add one line to the `BRANDS` table in `acbrands/__init__.py`.
+
+If the brand can report electricity use, set `energy=True` in `CAPS` and
+implement `energy_daily(device, start, end)`, returning `{date: kWh}` for the
+days it actually has. Leave it out and the Electricity section never appears.
 
 `setup.sh` then offers the brand and collects the credential fields it
 declares. `acbrands/template.py` carries notes for the three common cases:

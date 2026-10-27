@@ -6,7 +6,9 @@ when a brand supports fewer controls:
     AC_DEMO_CAPS=minimal     only power, temperature and two modes
 """
 
+import hashlib
 import os
+from datetime import timedelta
 
 from .base import ACDriver, Capabilities, Device, Field
 
@@ -18,6 +20,7 @@ FULL = Capabilities(
            (3, "Level 3"), (4, "Level 4"), (5, "Level 5")],
     presets=[("eco", "Eco"), ("boost", "Powerful")],
     toggles=[("display", "Display")],
+    energy=True,
 )
 
 # A deliberately plain unit: the panel should hide both knobs and the presets.
@@ -75,3 +78,22 @@ class DemoDriver(ACDriver):
             st["toggles"][action] = bool(value)
         else:
             raise ValueError("The demo AC has no '%s' control" % action)
+
+    async def energy_daily(self, device, start, end):
+        """Invented but stable readings, so the chart looks like a real month.
+
+        Derived from the date and the unit's id rather than randomly, so the
+        same day always reads the same and the panel does not flicker. A
+        couple of days are left out on purpose: gaps are a real thing the
+        service does, and the chart has to survive them.
+        """
+        readings, day = {}, start
+        while day <= end:
+            seed = hashlib.md5(("%s%s" % (device.id, day)).encode()).digest()
+            if seed[0] < 12:                     # roughly one day in twenty
+                day += timedelta(days=1)
+                continue
+            weekend = 1.25 if day.weekday() >= 5 else 1.0
+            readings[day] = round((1.8 + seed[1] / 255.0 * 4.5) * weekend, 2)
+            day += timedelta(days=1)
+        return readings
