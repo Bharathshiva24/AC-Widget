@@ -43,11 +43,15 @@ class Capabilities:
     the order shown, so list fan speeds from gentlest to strongest.
     """
 
-    def __init__(self, modes=(), fan=(), swing=(), presets=(), toggles=(),
+    def __init__(self, modes=(), fan=(), swing=(), hswing=(), presets=(), toggles=(),
                  temp=None, room_temp=True, energy=False):
         self.modes = [tuple(x) for x in modes]
         self.fan = [tuple(x) for x in fan]
         self.swing = [tuple(x) for x in swing]
+        # Left-to-right airflow, which most units control separately from the
+        # up-and-down louvre. A brand with only one swing axis leaves this
+        # empty and that second row never appears.
+        self.hswing = [tuple(x) for x in hswing]
         self.presets = [tuple(x) for x in presets]
         self.toggles = [tuple(x) for x in toggles]
         self.temp = dict(temp or DEFAULT_TEMP)
@@ -61,8 +65,8 @@ class Capabilities:
         """True when this unit accepts `action` (and `value`, when given)."""
         if action in ("power", "temp"):
             return True
-        group = {"mode": self.modes, "fan": self.fan,
-                 "swing": self.swing, "preset": self.presets}.get(action)
+        group = {"mode": self.modes, "fan": self.fan, "swing": self.swing,
+                 "hswing": self.hswing, "preset": self.presets}.get(action)
         if group is None:
             group = self.toggles
             if action not in [v for v, _ in self.toggles]:
@@ -80,6 +84,7 @@ class Capabilities:
         return {"modes": [list(x) for x in self.modes],
                 "fan": [list(x) for x in self.fan],
                 "swing": [list(x) for x in self.swing],
+                "hswing": [list(x) for x in self.hswing],
                 "presets": [list(x) for x in self.presets],
                 "toggles": [list(x) for x in self.toggles],
                 "temp": self.temp, "room_temp": self.room_temp,
@@ -98,7 +103,7 @@ class Device:
         """Current state as plain JSON-safe values.
 
         Returns keys: online, power, temp, room_temp, mode, fan, swing,
-        preset, toggles. Anything the unit does not have may be None (or an
+        hswing, preset, toggles. Anything the unit does not have may be None (or an
         empty dict for toggles).
         """
         raise NotImplementedError

@@ -24,10 +24,15 @@ FAN = [("auto", "Auto"), ("quiet", "Quiet"), ("low", "Low"),
        ("medium", "Medium"), ("high", "High")]
 SWING = [(0, "Auto"), (1, "Level 1"), (2, "Level 2"),
          (3, "Level 3"), (4, "Level 4"), (5, "Level 5")]
+# Left-to-right airflow. The same five positions as the vertical louvre, named
+# for where the air is pointed rather than numbered, because "Level 3" says
+# nothing about a direction.
+HSWING = [(0, "Auto"), (1, "Far left"), (2, "Left"), (3, "Centre"),
+          (4, "Right"), (5, "Far right")]
 PRESETS = [("eco", "Eco"), ("boost", "Powerful")]
 TOGGLES = []
 
-CAPS = Capabilities(modes=MODES, fan=FAN, swing=SWING, presets=PRESETS,
+CAPS = Capabilities(modes=MODES, fan=FAN, swing=SWING, hswing=HSWING, presets=PRESETS,
                     toggles=TOGGLES, temp={"min": 16, "max": 30, "step": 1},
                     room_temp=True, energy=True)
 
@@ -62,6 +67,7 @@ class MirAIeDevice(Device):
             "mode": st.hvac_mode.value,
             "fan": st.fan_mode.value,
             "swing": st.v_swing_mode.value,
+            "hswing": st.h_swing_mode.value,
             "preset": st.preset_mode.value,
             "toggles": {"display": st.display_mode == DisplayMode.ON},
         }
@@ -117,6 +123,8 @@ class MirAIeDriver(ACDriver):
             await raw.set_preset_mode(PresetMode(value))
         elif action == "swing":
             await raw.set_v_swing_mode(SwingMode(int(value)))
+        elif action == "hswing":
+            await raw.set_h_swing_mode(SwingMode(int(value)))
         elif action == "display":
             await raw.set_display_mode(DisplayMode.ON if value else DisplayMode.OFF)
         else:

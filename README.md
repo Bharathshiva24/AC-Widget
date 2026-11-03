@@ -3,7 +3,8 @@
 A macOS menubar panel for controlling smart air conditioners.
 
 Click the menubar item and a compact panel drops down with everything on one
-screen: a temperature dial, the running mode, fan speed, swing and presets. It
+screen: a temperature dial, the running mode, fan speed, both swing axes and
+presets. It
 follows the system light or dark setting and is built to feel like a part of
 macOS rather than a web page in a window.
 
@@ -50,7 +51,8 @@ there is no bundler and no front-end framework.
 
 **The panel**
 - A 320pt popover that sizes itself to its contents: a 270° temperature dial,
-  mode buttons, fan speed and swing selectors, and preset toggles.
+  mode buttons, fan speed, vertical and horizontal swing selectors, and preset
+  toggles.
 - Switched off, the dial goes quiet and the controls dim in place rather than
   disappearing, so the panel never jumps around.
 - Multiple units are supported, switched from the name dropdown in the header.
@@ -92,6 +94,9 @@ there is no bundler and no front-end framework.
 **Controls**
 - Temperature dial with drag, `−`/`+` buttons and arrow keys.
 - Mode buttons, segmented fan-speed and swing selectors, and preset toggles.
+- Swing is two rows, up-and-down and left-to-right, each drawn only if the
+  unit steers that axis. The horizontal options are named for where the air
+  is pointed rather than numbered.
 - Only the controls the selected unit reports are drawn; the window resizes to
   fit what is left.
 
@@ -183,6 +188,7 @@ then `.env`, then the Keychain.
 | Set temperature | Drag the dial, use `−` / `+`, or arrow keys |
 | Change mode | Click a mode button |
 | Fan speed / swing | Click an option in the selector |
+| Airflow direction | Horizontal Swing, left to right |
 | Switch unit | The name dropdown in the header |
 | Settings | The gear icon, left of the power button |
 | Automation | Settings → **Automatic control** |
@@ -213,7 +219,8 @@ controls, so a unit without swing simply never gets that selector — no
 interface code changes.
 
 1. Copy `acbrands/template.py` to `acbrands/yourbrand.py`.
-2. Fill in `CAPS` (modes, fan speeds, swing levels, presets, temperature range)
+2. Fill in `CAPS` (modes, fan speeds, both swing axes, presets, temperature
+   range)
    and implement `connect()`, `command()` and `Device.snapshot()`.
 3. Add one line to the `BRANDS` table in `acbrands/__init__.py`.
 

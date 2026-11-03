@@ -18,6 +18,8 @@ FULL = Capabilities(
          ("medium", "Medium"), ("high", "High")],
     swing=[(0, "Auto"), (1, "Level 1"), (2, "Level 2"),
            (3, "Level 3"), (4, "Level 4"), (5, "Level 5")],
+    hswing=[(0, "Auto"), (1, "Far left"), (2, "Left"), (3, "Centre"),
+            (4, "Right"), (5, "Far right")],
     presets=[("eco", "Eco"), ("boost", "Powerful")],
     toggles=[("display", "Display")],
     energy=True,
@@ -26,7 +28,7 @@ FULL = Capabilities(
 # A deliberately plain unit: the panel should hide both knobs and the presets.
 MINIMAL = Capabilities(
     modes=[("cool", "Cool"), ("fan", "Fan")],
-    fan=[], swing=[], presets=[], toggles=[],
+    fan=[], swing=[], hswing=[], presets=[], toggles=[],
     temp={"min": 18, "max": 28, "step": 1}, room_temp=False,
 )
 
@@ -42,6 +44,7 @@ class DemoDevice(Device):
             "mode": caps.modes[0][0] if caps.modes else "cool",
             "fan": caps.fan[2][0] if len(caps.fan) > 2 else None,
             "swing": caps.swing[1][0] if len(caps.swing) > 1 else None,
+            "hswing": caps.hswing[3][0] if len(caps.hswing) > 3 else None,
             "preset": "none",
             "toggles": {name: True for name, _ in caps.toggles},
         }
@@ -68,7 +71,7 @@ class DemoDriver(ACDriver):
             st["power"] = bool(value)
         elif action == "temp":
             st["temp"] = float(device.caps.clamp(value))
-        elif action in ("mode", "fan", "swing"):
+        elif action in ("mode", "fan", "swing", "hswing"):
             st[action] = value
         elif action == "preset":
             st["preset"] = value

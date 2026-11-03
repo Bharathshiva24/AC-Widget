@@ -864,8 +864,12 @@ svg{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-l
   <div class="hsel" id="sel-fan" role="group" aria-label="Fan speed"></div>
 </div>
 <div class="hgroup" id="g-swing">
-  <div class="hrow"><span>Swing</span><b id="v-swing">--</b></div>
-  <div class="hsel" id="sel-swing" role="group" aria-label="Swing"></div>
+  <div class="hrow"><span>Vertical Swing</span><b id="v-swing">--</b></div>
+  <div class="hsel" id="sel-swing" role="group" aria-label="Vertical swing"></div>
+</div>
+<div class="hgroup" id="g-hswing">
+  <div class="hrow"><span>Horizontal Swing</span><b id="v-hswing">--</b></div>
+  <div class="hsel" id="sel-hswing" role="group" aria-label="Horizontal swing"></div>
 </div>
 <div class="pills" id="pills"></div>
 
@@ -919,7 +923,7 @@ document.documentElement.style.setProperty("--tick",
 
 /* Every option list comes from the selected AC's capabilities, so a brand with
    no swing control simply never gets that selector. */
-let SEGS={mode:[],fan:[],swing:[]}, capsKey="", TMIN=16, TMAX=30, TSPAN=14;
+let SEGS={mode:[],fan:[],swing:[],hswing:[]}, capsKey="", TMIN=16, TMAX=30, TSPAN=14;
 let s=null, sel=null, hold=0, tempTimer=null, dragging=false, lastUi="", choiceTimer={}, menuKey="";
 try{ sel=localStorage.getItem("ac-selected"); }catch(e){}
 
@@ -968,7 +972,7 @@ function setSeg(key,value){
 }
 /* Horizontal icon selectors for fan speed and swing. Options come from the
    AC's capabilities: --n sizes the sliding highlight, --i positions it. */
-const SELECTORS={fan:{opts:[]},swing:{opts:[]}};
+const SELECTORS={fan:{opts:[]},swing:{opts:[]},hswing:{opts:[]}};
 
 /* Fan speed reads as a four-bar meter: bars up to this speed are solid and the
    rest stay faint, so every option shares a silhouette and only the fill moves. */
@@ -992,7 +996,19 @@ function swingIcon(value,index,total){
   const levels=Math.max(2,total-1), angle=10+(index-1)*(60/(levels-1));
   return lip+'<g transform="rotate('+angle.toFixed(1)+' 12 13.500)"><path d="M6 13.500h12"/></g>';
 }
-const SEL_ICON={fan:fanIcon,swing:swingIcon};
+/* Left-to-right airflow is the same louver seen from above: the unit's face
+   stays put and the vane swings beneath it, 50° either side of centre. Positive
+   rotation carries the vane left, so the options read left to right in order. */
+function hswingIcon(value,index,total){
+  const face='<path d="M5.500 5.500h13"/>';
+  if(value===0||value==="auto"||value==="0") return '<path d="'+ICON.auto+'"/>';
+  const levels=Math.max(2,total-1), angle=50-(index-1)*(100/(levels-1));
+  // An arrowhead, not a bare line: the vertical row above is already lines at
+  // angles, and at this size the two would be a moment's work to tell apart.
+  return face+'<g transform="rotate('+angle.toFixed(1)+' 12 8.500)">'+
+    '<path d="M12 8.500v9.200"/><path d="M9.300 15.100 12 17.900l2.700-2.800"/></g>';
+}
+const SEL_ICON={fan:fanIcon,swing:swingIcon,hswing:hswingIcon};
 
 function buildSelector(key,opts){
   const box=$("sel-"+key), st=SELECTORS[key];
@@ -1020,7 +1036,7 @@ function setSelector(key,value){
 /* Rebuild every control from what the selected AC reports it can do. */
 function applyCaps(caps){
   const key=JSON.stringify(caps); if(key===capsKey) return; capsKey=key;
-  SEGS={mode:caps.modes||[],fan:caps.fan||[],swing:caps.swing||[]};
+  SEGS={mode:caps.modes||[],fan:caps.fan||[],swing:caps.swing||[],hswing:caps.hswing||[]};
   TMIN=caps.temp.min; TMAX=caps.temp.max; TSPAN=Math.max(1,TMAX-TMIN);
   $("dial").setAttribute("aria-valuemin",TMIN); $("dial").setAttribute("aria-valuemax",TMAX);
 
@@ -1034,7 +1050,9 @@ function applyCaps(caps){
   modes.hidden=!SEGS.mode.length;
 
   buildSelector("fan",SEGS.fan); buildSelector("swing",SEGS.swing);
+  buildSelector("hswing",SEGS.hswing);
   $("g-fan").hidden=!SEGS.fan.length; $("g-swing").hidden=!SEGS.swing.length;
+  $("g-hswing").hidden=!SEGS.hswing.length;
 
   const pills=$("pills"); pills.innerHTML="";
   const add=(id,label,icon,onclick)=>{
@@ -1057,7 +1075,7 @@ function applyCaps(caps){
   const count=(caps.presets||[]).length+(caps.toggles||[]).length;
   pills.hidden=!count;
   pills.style.gridTemplateColumns=count===1?"1fr":"1fr 1fr";
-  document.querySelector(".rule").hidden=!SEGS.fan.length&&!SEGS.swing.length&&!count;
+  document.querySelector(".rule").hidden=!SEGS.fan.length&&!SEGS.swing.length&&!SEGS.hswing.length&&!count;
 }
 function applyChoice(key,val){
   const d=cur(); if(!d||d[key]===val) return;
@@ -1104,6 +1122,7 @@ function render(){
   setSeg("mode",d.mode);
   if(SEGS.fan.length) setSelector("fan",d.fan);
   if(SEGS.swing.length) setSelector("swing",d.swing);
+  if(SEGS.hswing.length) setSelector("hswing",d.hswing);
   (d.caps.presets||[]).forEach(([value])=>{
     const b=$("p-"+value); if(!b) return;
     const on=d.preset===value;

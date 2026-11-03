@@ -27,7 +27,8 @@ from .base import ACDriver, AuthError, Capabilities, Device, Field
 CAPS = Capabilities(
     modes=[("cool", "Cool"), ("heat", "Heat"), ("fan", "Fan")],
     fan=[("low", "Low"), ("high", "High")],
-    swing=[],                      # empty: this unit has no swing control
+    swing=[],                      # up and down; empty: no swing control
+    hswing=[],                     # left to right, if the unit steers that too
     presets=[],                    # empty: no eco/powerful modes
     toggles=[],                    # e.g. [("display", "Display")]
     temp={"min": 16, "max": 30, "step": 1},
@@ -66,7 +67,7 @@ class TemplateDriver(ACDriver):
         raise NotImplementedError("Sign in and return devices here")
 
     async def command(self, device, action, value):
-        """Apply one change: power, temp, mode, fan, swing, preset, or a toggle
+        """Apply one change: power, temp, mode, fan, swing, hswing, preset, or a toggle
         name from CAPS. Values arrive exactly as declared in CAPS."""
         raise NotImplementedError("Send the command to the unit here")
 
